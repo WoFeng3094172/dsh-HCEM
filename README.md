@@ -59,12 +59,6 @@ HCEM 是 DeepSeek Harness（DSH）的插件，核心机制：
 
 情绪面板：`http://127.0.0.1:8082/hsl`（只读，色环 + S/L 平面）。
 
-<p align="center">
-  <img src="docs/hsl-panel.png" alt="HCEM 情绪面板：HSL 色环与 S/L 明度平面" width="560">
-  <br>
-  <sub>情绪面板 · 外环为色相 H，内方为 S/L 平面</sub>
-</p>
-
 悬浮小窗：双击 `plugin/ui/HCEM情绪悬浮窗.cmd`。
 
 ## 工具（给 AI 的）

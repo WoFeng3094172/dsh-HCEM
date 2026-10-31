@@ -7,12 +7,6 @@
 > HSL 色彩情绪记忆系统：让 AI 拥有拟人化的情绪波动、可模糊的记忆与独立的人设。
 > 面向陪伴型对话，**不适用于严谨工作**。
 
-<p align="center">
-  <img src="docs/hsl-panel.png" alt="HCEM 情绪面板：HSL 色环与 S/L 明度平面" width="680">
-  <br>
-  <sub>情绪面板 · <code>http://127.0.0.1:8082/hsl</code>（只读，外环=色相 H，内方=S/L 平面）</sub>
-</p>
-
 ## 这是什么
 
 HCEM 是 DeepSeek Harness（DSH）的插件，核心机制：
