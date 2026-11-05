@@ -1,0 +1,154 @@
+<!doctype html>
+<!-- HCEM 原创：枂枫（B站 UID 3094172）与助手 DeepSeek · HSL 情绪引擎 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>HCEM 情绪</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101216; color: #e6e8ee; font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .wrap { display: grid; gap: 18px; justify-items: center; }
+  /* 只读面板：整个轮盘禁用指针交互，用户不能拖动/点击调情绪 */
+  .wheel { position: relative; width: 340px; height: 340px; pointer-events: none; user-select: none; }
+  .ring {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: conic-gradient(#FFD700, #7CFC00, #00E5FF, #4169E1, #FF00FF, #FF0000, #FFD700);
+    -webkit-mask: radial-gradient(circle, transparent 61%, #000 62%, #000 74%, transparent 75%);
+    mask: radial-gradient(circle, transparent 61%, #000 62%, #000 74%, transparent 75%);
+  }
+  .pointer { position: absolute; inset: 0; border-radius: 50%; transform-origin: 50% 50%; }
+  .pointer i { position: absolute; left: 50%; top: 8px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(0,0,0,.55); }
+  canvas { position: absolute; left: 50%; top: 50%; width: 190px; height: 190px; transform: translate(-50%, -50%); border-radius: 10px; }
+  .dot { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid #101216; border-radius: 50%; box-shadow: 0 0 0 2px #fff; pointer-events: none; }
+  .readout { display: flex; gap: 14px; align-items: baseline; font-variant-numeric: tabular-nums; }
+  .readout b { font-size: 15px; letter-spacing: .3px; }
+  .readout em { font-style: normal; color: #9fb4ff; }
+  .meta { color: #7c8496; font-size: 12px; }
+  .off { color: #c98b8b; }
+  /* 紧凑模式：?compact=1，用于悬浮小窗 */
+  body.compact .wheel { width: 190px; height: 190px; }
+  body.compact canvas { width: 106px; height: 106px; border-radius: 8px; }
+  body.compact .pointer i { top: 6px; width: 9px; height: 9px; margin-left: -4.5px; }
+  body.compact .dot { width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; }
+  body.compact .readout b { font-size: 12px; }
+  body.compact .readout em { font-size: 11px; }
+  body.compact .meta { font-size: 10px; }
+  body.compact .wrap { gap: 10px; }
+  /* mini 模式：悬浮小窗 */
+  body.mini .wheel { width: 108px; height: 108px; }
+  body.mini canvas { width: 56px; height: 56px; border-radius: 6px; }
+  body.mini .pointer i { top: 3px; width: 6px; height: 6px; margin-left: -3px; }
+  body.mini .dot { width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-width: 1px; }
+  body.mini .readout { gap: 6px; }
+  body.mini .readout b { font-size: 9px; }
+  body.mini .readout em { font-size: 8px; }
+  body.mini .meta { font-size: 8px; }
+  body.mini .wrap { gap: 5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="wheel">
+    <div class="ring"></div>
+    <div class="pointer" id="pointer"><i></i></div>
+    <canvas id="plane" width="190" height="190"></canvas>
+    <div class="dot" id="dot"></div>
+  </div>
+  <div class="readout">
+    <b id="h">H=–</b><b id="s">S=–</b><b id="l">L=–</b><em id="name">–</em>
+  </div>
+  <div class="meta" id="meta">连接中…</div>
+
+</div>
+<script>
+const params = new URLSearchParams(location.search)
+if (params.get('compact') === '1') document.body.classList.add('compact')
+if (params.get('mini') === '1') document.body.classList.add('mini', 'compact')
+
+const EMOTIONS = [
+  [0, '快乐'], [60, '惊讶'], [120, '恐惧'], [180, '悲伤'], [240, '厌恶'], [300, '愤怒'],
+]
+const $ = (id) => document.getElementById(id)
+const canvas = $('plane')
+const ctx = canvas.getContext('2d')
+
+function hslToRgb(h, s, l) {
+  s /= 100; l /= 100
+  const c = (1 - Math.abs(2 * l - 1)) * s
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = l - c / 2
+  let r = 0, g = 0, b = 0
+  if (h < 60) [r, g, b] = [c, x, 0]
+  else if (h < 120) [r, g, b] = [x, c, 0]
+  else if (h < 180) [r, g, b] = [0, c, x]
+  else if (h < 240) [r, g, b] = [0, x, c]
+  else if (h < 300) [r, g, b] = [x, 0, c]
+  else [r, g, b] = [c, 0, x]
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
+}
+
+let lastH = -1
+function drawPlane(H) {
+  const w = canvas.width, h = canvas.height
+  const img = ctx.createImageData(w, h)
+  for (let y = 0; y < h; y += 1) {
+    const L = (1 - y / (h - 1)) * 100
+    for (let x = 0; x < w; x += 1) {
+      const S = (x / (w - 1)) * 100
+      const [r, g, b] = hslToRgb(H, S, L)
+      const i = (y * w + x) * 4
+      img.data[i] = r
+      img.data[i + 1] = g
+      img.data[i + 2] = b
+      img.data[i + 3] = 255
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+}
+
+function nearestName(H) {
+  let best = EMOTIONS[0], bestD = 999
+  for (const e of EMOTIONS) {
+    const d = Math.min(Math.abs(H - e[0]), 360 - Math.abs(H - e[0]))
+    if (d < bestD) { bestD = d; best = e }
+  }
+  return best[1]
+}
+
+function render(state) {
+  if (!state?.hsl) {
+    $('meta').textContent = '情绪未就绪（插件未运行？）'
+    $('meta').className = 'meta off'
+    return
+  }
+  const H = ((state.hsl.H % 360) + 360) % 360
+  const S = state.hsl.S, L = state.hsl.L
+  if (Math.abs(H - lastH) > 0.5) { drawPlane(H); lastH = H }
+  $('pointer').style.transform = `rotate(${H}deg)`
+  $('h').textContent = `H=${Math.round(H)}°`
+  $('s').textContent = `S=${Math.round(S)}%`
+  $('l').textContent = `L=${Math.round(L)}%`
+  $('name').textContent = nearestName(H)
+  const wheel = document.querySelector('.wheel').getBoundingClientRect()
+  const plane = canvas.getBoundingClientRect()
+  $('dot').style.left = `${plane.left - wheel.left + (S / 100) * plane.width}px`
+  $('dot').style.top = `${plane.top - wheel.top + (1 - L / 100) * plane.height}px`
+  $('meta').textContent = `${state.enabled ? '已启用' : '已关闭'} · ${new Date().toLocaleTimeString()}`
+  $('meta').className = 'meta'
+}
+
+async function tick() {
+  try {
+    const s = await fetch('/api/state').then((r) => r.json())
+    render(s)
+  } catch {
+    $('meta').textContent = '连接断开'
+    $('meta').className = 'meta off'
+  }
+}
+tick()
+setInterval(tick, 1000)
+</script>
+</body>
+</html>
