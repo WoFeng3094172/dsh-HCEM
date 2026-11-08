@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>HCEM 设置</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.65 "Segoe UI", "Microsoft YaHei", sans-serif; background: #14161a; color: #e6e8ee; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 16px; padding: 12px 24px; background: #1b1e24; border-bottom: 1px solid #2a2f38; }
+  header h1 { margin: 0; font-size: 16px; letter-spacing: .5px; flex: 0 0 auto; }
+  header .status { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; font-variant-numeric: tabular-nums; color: #b9c2d6; }
+  main { max-width: 920px; margin: 0 auto; padding: 24px 20px 100px; display: grid; gap: 20px; }
+
+  /* 分组卡片：仿 dshmarket 管理页 */
+  .group { background: #1b1e24; border: 1px solid #2a2f38; border-radius: 12px; overflow: hidden; }
+  .group > .head { padding: 16px 20px 6px; }
+  .group > .head h2 { margin: 0; font-size: 15px; color: #e6e8ee; }
+  .group > .head p { margin: 4px 0 0; font-size: 12px; color: #8b93a7; }
+
+  /* 行：左标题+说明，右控件 */
+  .item { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 20px; border-top: 1px solid #242933; }
+  .item:first-of-type { border-top: 0; }
+  .item-text { min-width: 0; }
+  .item-text .title { font-size: 14px; color: #e6e8ee; }
+  .item-text .desc { margin-top: 2px; font-size: 12px; color: #8b93a7; line-height: 1.55; }
+  .item-control { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; }
+  .item-control.wide { flex: 1 1 auto; }
+
+  /* 控件样式 */
+  input[type=text], input[type=password], textarea { width: 100%; background: #12141a; color: #e6e8ee; border: 1px solid #2a2f38; border-radius: 8px; padding: 8px 10px; font: inherit; }
+  textarea { resize: vertical; min-height: 180px; }
+  input[type=range] { width: 220px; accent-color: #6b7fd7; }
+  .val { width: 34px; text-align: right; font-variant-numeric: tabular-nums; color: #b9c2d6; }
+  button { background: #2d3550; color: #eef1ff; border: 1px solid #3d4a6e; border-radius: 8px; padding: 7px 14px; cursor: pointer; font: inherit; white-space: nowrap; }
+  button:hover { background: #384361; }
+  button.primary { background: #3b4a7a; border-color: #4c5f9a; }
+  button.danger { background: #5c2a2a; border-color: #7d3a3a; }
+  button.danger:hover { background: #6d3232; }
+  .hint { color: #8b93a7; font-size: 12px; }
+  .warn { color: #d9b96a; font-size: 12px; line-height: 1.7; background: #201d14; border: 1px solid #3a3524; border-radius: 8px; padding: 10px 14px; margin: 8px 20px 16px; }
+  .err { color: #ff7a7a; }
+  .ok { color: #6fdc8c; }
+  .pill { background: #12141a; border: 1px solid #2a2f38; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+  .pill.on { border-color: #3d5c46; color: #8fd9a2; }
+  .pill.off { border-color: #5c3d3d; color: #e08b8b; }
+
+  /* 开关 */
+  .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex: 0 0 auto; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; background: #2a2f38; border-radius: 999px; transition: .15s; cursor: pointer; }
+  .switch span::before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #8b93a7; border-radius: 50%; transition: .15s; }
+  .switch input:checked + span { background: #3d5c46; }
+  .switch input:checked + span::before { transform: translateX(20px); background: #8fd9a2; }
+  .switch input:disabled + span { opacity: .4; cursor: not-allowed; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
+  @media (max-width: 720px) {
+    .item { flex-direction: column; align-items: stretch; }
+    .item-control { justify-content: flex-end; }
+    input[type=range] { width: 100%; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>HCEM 设置</h1>
+  <a href="/hsl" target="_blank" class="hint" style="color:#9fb4ff;text-decoration:none">情绪面板 ↗</a>
+  <div class="status" id="status">加载中…</div>
+</header>
+<main>
+
+  <section class="group">
+    <div class="head">
+      <h2>总开关</h2>
+      <p>关闭后：AI 不再注入情绪与记忆、不写新记忆，并在会话里回复「HCEM 插件未打开」；设置页显示「插件未运行」。想彻底停止插件加载，请到插件管理页关闭 HCEM（重启后生效）。</p>
+    </div>
+    <div class="item">
+      <div class="item-text">
+        <div class="title">启用 HCEM（总开关）</div>
+        <div class="desc" id="pluginState">检查插件状态…</div>
+      </div>
+      <div class="item-control">
+        <label class="switch"><input type="checkbox" id="enabled"><span></span></label>
+      </div>
+    </div>
+  </section>
+
+  <section class="group">
+    <div class="head">
+      <h2>角色卡</h2>
+      <p>AI 自述的人设。性格会随与用户积攒的记忆而变化，滑块只影响初始倾向。</p>
+    </div>
+    <div class="item">
+      <div class="item-text">
+        <div class="title">角色卡文本</div>
+        <div class="desc" id="personaMsg"></div>
+      </div>
+      <div class="item-control">
+        <button id="savePersona">保存</button>
+      </div>
+    </div>
+    <div class="item" style="display:block">
+      <textarea id="persona" rows="12"></textarea>
+    </div>
+  </section>
+
+  <section class="group">
+    <div class="head">
+      <h2>性格滑块</h2>
+      <p>用户左右最多 5，AI 可随成长到 ±15。</p>
+    </div>
+    <div class="item">
+      <div class="item-text"><div class="title">热情 ↔ 冷漠</div></div>
+      <div class="item-control"><input type="range" id="warmth" min="-15" max="15" step="1"><span class="val" id="warmthV">0</span></div>
+    </div>
+    <div class="item">
+      <div class="item-text"><div class="title">宽容 ↔ 挑剔</div></div>
+      <div class="item-control"><input type="range" id="tolerance" min="-15" max="15" step="1"><span class="val" id="toleranceV">0</span></div>
+    </div>
+    <div class="item">
+      <div class="item-text"><div class="title">乐观 ↔ 悲观</div></div>
+      <div class="item-control"><input type="range" id="optimism" min="-15" max="15" step="1"><span class="val" id="optimismV">0</span></div>
+    </div>
+    <div class="item">
+      <div class="item-text">
+        <div class="title">AI 偏好</div>
+        <div class="desc" id="naturalInfo"></div>
+      </div>
+      <div class="item-control"><button class="primary" id="saveSliders">保存滑块</button><span class="hint" id="sliderMsg"></span></div>
+    </div>
+  </section>
+
+  <section class="group">
+    <div class="head">
+      <h2>搭话程度</h2>
+      <p>由 L（明度/自信）自动决定，随 AI 成长会自己改变。</p>
+    </div>
+    <div class="item">
+      <div class="item-text">
+        <div class="title">安静 ↔ 话痨</div>
+        <div class="desc">安静：L≤55% ｜ 好奇：55%＜L≤60% ｜ 话痨：L＞60%</div>
+      </div>
+      <div class="item-control"><input type="range" id="talk" min="0" max="2" step="1"><span class="val" id="talkV">安静</span></div>
+    </div>
+    <div class="item">
+      <div class="item-text"><div class="title">保存档位</div></div>
+      <div class="item-control"><button class="primary" id="saveTalk">保存</button><span class="hint" id="talkMsg"></span></div>
+    </div>
+  </section>
+
+  <section class="group">
+    <div class="head">
+      <h2>紧急联络人</h2>
+      <p>最多 2 个。AI 在危机时刻只会提醒你联系这些人，不会自动发送或上报。</p>
+    </div>
+    <div class="item" style="display:block">
+      <div class="grid2">
+        <input type="text" id="e1name" placeholder="联络人 1 的称呼">
+        <input type="text" id="e1contact" placeholder="联络人 1 的联系方式">
+        <input type="text" id="e2name" placeholder="联络人 2 的称呼">
+        <input type="text" id="e2contact" placeholder="联络人 2 的联系方式">
+      </div>
+    </div>
+    <div class="item">
+      <div class="item-text"><div class="title">保存联络人</div></div>
+      <div class="item-control"><button class="primary" id="saveContacts">保存</button><span class="hint" id="contactMsg"></span></div>
+    </div>
+  </section>
+
+  <section class="group">
+    <div class="head">
+      <h2 class="err">危险操作</h2>
+      <p>清空数据会先移动到 data\_trash-时间戳\，不会直接删除，可手动清理。清空后请重启 DSH。</p>
+    </div>
+    <div class="item">
+      <div class="item-text"><div class="title">删除密码</div><div class="desc">设置后清空数据需要输入密码</div></div>
+      <div class="item-control"><input type="password" id="delPwd" placeholder="可留空" style="width:180px"><button id="savePwd">设置</button></div>
+    </div>
+    <div class="item">
+      <div class="item-text"><div class="title">清空全部数据</div><div class="desc">需要输入 DELETE 确认</div></div>
+      <div class="item-control" style="flex-wrap:wrap">
+        <input type="password" id="wipePwd" placeholder="删除密码（若已设置）" style="width:170px">
+        <input type="text" id="confirmText" placeholder="输入 DELETE" style="width:130px">
+        <button class="danger" id="wipe">清空数据</button>
+        <span class="hint" id="wipeMsg"></span>
+      </div>
+    </div>
+  </section>
+
+</main>
+<script>
+const $ = (id) => document.getElementById(id)
+const TALK = ['安静', '好奇', '话痨']
+const FIVE = ['warmth', 'tolerance', 'optimism']
+
+async function api(path, opts) {
+  const res = await fetch(path, opts)
+  return res.json()
+}
+function putJson(path, body) {
+  return api(path, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+}
+function msg(id, text, ok) {
+  const el = $(id)
+  el.textContent = text
+  el.className = ok ? 'hint ok' : 'hint err'
+}
+
+function setStatus(s) {
+  const hsl = s.hsl ? `H=${Math.round(s.hsl.H)}° S=${Math.round(s.hsl.S)}% L=${Math.round(s.hsl.L)}%` : '情绪未就绪'
+  $('status').innerHTML =
+    `<span class="pill">${hsl}</span>` +
+    `<span class="pill ${s.pluginRunning ? 'on' : 'off'}">${s.pluginRunning ? '插件运行中' : '插件未运行'}</span>` +
+    `<span class="pill ${s.enabled ? 'on' : 'off'}">${s.enabled ? '已启用' : '已关闭'}</span>`
+}
+
+async function load() {
+  const s = await api('/api/state')
+  setStatus(s)
+  $('enabled').checked = !!s.enabled
+  $('pluginState').textContent = s.pluginRunning
+    ? '✅ 插件正在运行（插件管理页已启用）'
+    : '⚠️ 插件未运行：请先到「插件管理页」打开 hcem，再回来启用功能开关'
+  for (const k of FIVE) {
+    $(k).value = s.sliders?.[k] ?? 0
+    $(k + 'V').textContent = s.sliders?.[k] ?? 0
+  }
+  const nat = s.natural || {}
+  $('naturalInfo').textContent = 'H 偏移 ' + Number(nat.hue ?? 0) + '（±15，随长期情绪缓慢变化）'
+  const talk = Number(s.talkativeness ?? 0)
+  $('talk').value = talk
+  $('talkV').textContent = TALK[talk] || '安静'
+  const c = s.emergencyContacts || []
+  $('e1name').value = c[0]?.name || ''
+  $('e1contact').value = c[0]?.contact || ''
+  $('e2name').value = c[1]?.name || ''
+  $('e2contact').value = c[1]?.contact || ''
+  const p = await api('/api/persona')
+  $('persona').value = p.text || ''
+  $('personaMsg').textContent = (p.text || '').length + ' 字'
+}
+
+$('enabled').onchange = async () => {
+  const r = await putJson('/api/settings', { enabled: $('enabled').checked })
+  setStatus(await api('/api/state'))
+}
+
+const USER_LIMIT = 5
+for (const k of FIVE) {
+  $(k).oninput = () => {
+    let v = Number($(k).value)
+    if (Math.abs(v) > USER_LIMIT) {
+      v = Math.sign(v) * USER_LIMIT
+      $(k).value = v
+    }
+    $(k + 'V').textContent = v
+  }
+}
+$('talk').oninput = () => { $('talkV').textContent = TALK[+$('talk').value] }
+
+$('saveSliders').onclick = async () => {
+  const r = await putJson('/api/settings', {
+    sliders: {
+      warmth: Math.max(-5, Math.min(5, +$('warmth').value)),
+      tolerance: Math.max(-5, Math.min(5, +$('tolerance').value)),
+      optimism: Math.max(-5, Math.min(5, +$('optimism').value)),
+    },
+  })
+  msg('sliderMsg', r.ok ? '已保存' : '失败：' + r.error, r.ok)
+}
+
+$('saveTalk').onclick = async () => {
+  const r = await putJson('/api/settings', { talkativeness: +$('talk').value })
+  msg('talkMsg', r.ok ? '已保存' : '失败：' + r.error, r.ok)
+}
+
+$('savePersona').onclick = async () => {
+  const r = await putJson('/api/persona', { text: $('persona').value })
+  msg('personaMsg', r.ok ? '已保存，' + r.chars + ' 字' : '失败：' + r.error, r.ok)
+}
+
+$('saveContacts').onclick = async () => {
+  const contacts = [
+    { name: $('e1name').value.trim(), contact: $('e1contact').value.trim() },
+    { name: $('e2name').value.trim(), contact: $('e2contact').value.trim() },
+  ].filter((c) => c.name || c.contact)
+  const r = await putJson('/api/settings', { emergencyContacts: contacts })
+  msg('contactMsg', r.ok ? '已保存' : '失败：' + r.error, r.ok)
+}
+
+$('savePwd').onclick = async () => {
+  const r = await putJson('/api/settings', { deletePassword: $('delPwd').value })
+  msg('wipeMsg', r.ok ? (r.hasDeletePassword ? '已设置删除密码' : '已清除删除密码') : '失败：' + r.error, r.ok)
+}
+
+$('wipe').onclick = async () => {
+  if ($('confirmText').value !== 'DELETE') { msg('wipeMsg', '请输入 DELETE', false); return }
+  if (!confirm('确定清空全部数据？会移动到 _trash 目录，可手动恢复。')) return
+  const r = await api('/api/delete-all', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'DELETE', password: $('wipePwd').value }) })
+  msg('wipeMsg', r.ok ? ('已移动到 ' + r.trash + '，请重启 DSH') : ('失败：' + r.error), r.ok)
+}
+
+load()
+</script>
+</body>
+</html>
