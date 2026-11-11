@@ -11,12 +11,7 @@ coverage/
 *.tsbuildinfo
 
 # 运行数据（HCEM 私有数据：情绪、记忆、人设、日志、人物网）
-# data/ 下除 reincarnation 的说明文件外全部排除：
-# 这样「前世记忆」目录能随仓库分发指路，但用户放进去的记忆文件不会被提交。
-data/*
-!data/reincarnation/
-data/reincarnation/*
-!data/reincarnation/README.md
+data/
 _trash-*/
 *.sqlite
 *.sqlite-wal
