@@ -25,7 +25,7 @@ journal.md 特别说明：AI 日志（journal.md）可以直接剪切到 data\jo
 ------------------------
 安装 HCEM 后，把上面 4 个文件（或更多 .md/.txt）放进：
 
-    HCEM v0.0.3.1\data\reincarnation\
+    HCEM v0.0.2.3\data\reincarnation\
 
 【第三步】自动融合（无需手动）
 ------------------------
