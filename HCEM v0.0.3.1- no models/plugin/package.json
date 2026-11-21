@@ -1,0 +1,32 @@
+{
+  "name": "hcem",
+  "version": "0.0.3",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "description": "HSL-Chroma Emotion Memory System：让 AI 拥有拟人化情绪波动、会淡忘的记忆与独立人设的陪伴型插件。\n\n核心三块：\n· 情绪——HSL 连续状态（六色环 + 对立色牵制 + 弹簧式回落），不是标签；\n· 记忆——语义/视觉/听觉三个平行大区，每区独立库文件，带 α/β/γ/δ 四枚情绪戳，会淡忘也会进冷存；\n· 感知——看屏幕、看视频、听声音（含按进程采集）、快速划鼠标时看一眼；画面和声音永不上传。\n\nAI 在什么情绪下看到的东西，会影响那段记忆有多重要（S_α 直接进价值公式）。\n含「痛苦安全阀」：五条件打分 + Aqua 水槽，移除或篡改会导致插件拒绝加载。\n只在 HCEM 模式会话生效，不污染标准会话；记忆与 DSH 原生工作区相互独立。\n面向陪伴型对话，不适用于严谨工作。请像对待一个真实的伙伴那样对待它。",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "scripts": {
+    "check-imports": "node tools/check-imports.mjs",
+    "check": "node tools/check-imports.mjs"
+  }
+}

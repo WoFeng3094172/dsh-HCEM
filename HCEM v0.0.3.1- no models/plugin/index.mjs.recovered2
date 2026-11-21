@@ -1,0 +1,3364 @@
+import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { openStore, DB_PATH } from './lib/store.mjs'
+import { createIdleScheduler } from './lib/idle.mjs'
+import { createCaptureManager } from './lib/capture/manager.mjs'
+import { createPerceptionWindow } from './lib/perception/window.mjs'
+import { summarizeTwoStep } from './lib/summarize/two-step.mjs'
+import { createSenseScheduler } from './lib/perception/sense-scheduler.mjs'
+import { createCloudBoard } from './lib/perception/cloud-board.mjs'
+import { createGpuQueue, PRIORITY } from './lib/perception/gpu-queue.mjs'
+import { createFusion } from './lib/perception/fusion.mjs'
+import { summarizePerception } from './lib/perception/summarize.mjs'
+import { startStorageGuard } from './lib/storage-guard.mjs'
+import { audioTick, recordAndAnalyzeMusic, analyzeMusicDeep, analyzeMusic, transcribe, extractAudioFromVideo } from './lib/audio/pipeline.mjs'
+import { putAudioMemory } from './lib/audio/memory.mjs'
+import { createVoiceCall } from './lib/audio/call.mjs'
+import { setAsrTerms } from './lib/audio/asr.mjs'
+import { putVideoMemory } from './lib/memory-video.mjs'
+import { listRescueCandidates, rescueMemory, rateWhileWatching } from './lib/memory-rescue.mjs'
+import { analyzeVideoStoryboard } from './lib/perception/video-storyboard.mjs'
+import { digestVideo } from './lib/perception/video-digest.mjs'
+import { stopService } from './lib/services.mjs'
+import { speakReply, speakStream } from './lib/tts/bridge.mjs'
+import { createEmotion, toPromptText, analyzeText, applyStimulus, tick, settle, useSelfControl, selfConfidenceOf } from './lib/emotion.mjs'
+import { createEmbeddingAnalyzer } from './lib/emotion-embedding.mjs'
+import { detectInsult } from './lib/insult.mjs'
+import { shouldRemember, extractMemoryText, decayMemories, recall, computeGamma, summarize, displayText, applyRecallToEmotion, lightnessFromMemories, detectPinIntent, markMemoriesUsed, randomRecall } from './lib/memory.mjs'
+import {
+  loadPersona,
+  loadUserCard,
+  personaPrompt,
+  savePersona,
+  saveUserCard,
+  appendPersona,
+  appendUserCard,
+  editPersona,
+  editUserCard,
+  PERSONA_MAX_CHARS,
+  USER_CARD_MAX_CHARS,
+} from './lib/persona.mjs'
+import { loadSettings, saveSettings, baselineFromSliders, talkativenessPrompt } from './lib/settings.mjs'
+import { loadMe, ensureMe, saveMe, personaHash } from './lib/me.mjs'
+import { computeMD } from './lib/md.mjs'
+import { clockSnapshot } from './lib/clock.mjs'
+import { appendSample, computeBaseline } from './lib/emotion-samples.mjs'
+import { createSafetyWindow, recordTurn, evaluateSafety, safetyPrompt, SAFETY_FINGERPRINT, detectCrisis } from './lib/safety.mjs'
+import { listJournal, readJournal, writeJournal } from './lib/journal.mjs'
+import { buildRecall } from './lib/hibernation.mjs'
+import { promoteMemories } from './lib/zones.mjs'
+import { listPeople, readPerson, writePerson } from './lib/people.mjs'
+import { listWork, readWork, writeWork, workUsage } from './lib/work.mjs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { spawn, execSync } from 'node:child_process'
+import { log } from './lib/log.mjs'
+import { installLlmBridge } from './lib/llm-bridge.mjs'
+import { ingestReincarnation } from './lib/reincarnation.mjs'
+import { rmSync } from 'node:fs'
+import { createConnection } from 'node:net'
+import { describeScreen } from './lib/perception/vision.mjs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
+const EMBED_DIR = process.env.HCEM_EMBED_DIR || join(__dirname, '..', 'embedding-service')
+// L（自信）�?SC 耦合增益曲线：偏离基线越大，情绪�?L 的推力越�?
+// lGain = L_BASE × exp(L_EXPONENT × min(1, |L�?5|/45))
+const L_BASE = 1.0
+const L_EXPONENT = 1.5
+const DATA_DIR = process.env.HCEM_DATA_DIR || 'E:/HCEM/HCEM v0.0.3.1/data'
+const MODELS_DIR = process.env.HCEM_MODELS_DIR || 'E:/HCEM/HCEM v0.0.3.1/models'
+
+async function isEmbeddingUp() {
+  try {
+    const res = await fetch('http://127.0.0.1:8081/health', { signal: AbortSignal.timeout(2000) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+function spawnEmbeddingService(logger) {
+  try {
+    // 目录不存在就别硬 spawn（否则每次启动都报错�?
+    const entry = join(EMBED_DIR, 'server.mjs')
+    if (!existsSync(entry)) {
+      logger.debug?.(`[hcem] embedding service 不存在（${entry}），跳过`)
+      return false
+    }
+    const child = spawn(process.execPath, [entry], {
+      cwd: EMBED_DIR,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    child.unref()
+    logger.info?.(`[hcem] spawned embedding service (pid=${child.pid})`)
+    return true
+  } catch (error) {
+    logger.warn?.(`[hcem] failed to spawn embedding service: ${String((error && error.message) || error)}`)
+    return false
+  }
+}
+
+// VLM/本地模型服务（llama-server）：插件启动时自动拉起核心服务（Qwen3-0.6B / Qwen3-Embedding�?
+// 视觉类（Qwen2.5-VL 8091 / SmolVLM 8092）按霢�拉起（见 hcem_screen_look�?
+const LLAMA_SERVER = join(__dirname, '..', 'models', 'llama.cpp-cuda', 'llama-server.exe')
+
+function portUp(port) {
+  return new Promise((resolve) => {
+    const sock = createConnection({ host: '127.0.0.1', port, timeout: 800 })
+    sock.once('connect', () => { sock.destroy(); resolve(true) })
+    sock.once('timeout', () => { sock.destroy(); resolve(false) })
+    sock.once('error', () => { resolve(false) })
+  })
+}
+
+
+async function ensureEmbeddingService(logger) {
+  // Qwen3-Embedding 是常驻基硢�设施（记忆去�?/ 语义缓存 / 情绪语义都靠它）�?
+  // 不再跟��本地分流常驻��开关绑定：关掉分流，记忆仍然要能查回来�?
+  try {
+    if (!(await isEmbeddingUp())) {
+      const r = startService('embedding', logger)
+      if (r && r.ok === false) logger.warn?.('[hcem] embedding 拉起失败: ' + String(r.error || ''))
+    }
+  } catch (error) {
+    logger.warn?.('[hcem] embedding 拉起异常: ' + String((error && error.message) || error))
+  }
+  for (let i = 0; i < 40; i += 1) {
+    if (await isEmbeddingUp()) return true
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  logger.warn?.('[hcem] Qwen3-Embedding (8094) 未就绪，情绪分析将回逢�关键�?)
+  return false
+}
+
+// 旧网页设置页�?082）已逢�休：全部设置�?Tauri 中控
+
+
+const LOG_DIR = process.env.HCEM_LOGS_DIR || join(__dirname, '..', 'logs')
+const LOG_FILE = `${LOG_DIR}\\events.log`
+
+function logDebug(message) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${message}\n`)
+  } catch {
+    // ignore
+  }
+}
+
+// ┢�┢� 消息事件去重�?026-10-30）─┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
+// 现象：同丢��?user/message 会被结算两次（记忆一行变两行、情�?样本跑两轮）�?
+// 原因：hcem 这个包同时出现在 profile �?bundles 里（root 作用域插入）�?
+// 又在 preset-hcem �?plugins 里被插入了一次（会话作用域插入）�?
+// 两个插件实例都订阅了 session/event，于是同丢�条消息被处理两遍�?
+// 这里用进程级注册表按「会�?+ 消息 id」认领，先到的实例处理，后到的跳过；
+// �?globalThis 存是为了防止两个实例被解析成不同的模块实例��?
+const SEEN_USER_MESSAGES = (globalThis.__hcemSeenUserMessages ??= new Map())
+const SEEN_USER_MESSAGES_TTL_MS = 10 * 60 * 1000
+
+export function claimUserMessage(session, data, text, now = Date.now()) {
+  const sessionId = session?.id ?? ''
+  // 优先用消息自�?id（同丢�事件被广播时不变）；没有 id 时���化为「时�?2 秒的�?+ 文本」��?
+  const key = data?.id
+    ? `${sessionId}|${data.id}`
+    : `${sessionId}|${Math.floor(now / 2000)}|${String(text ?? '').slice(0, 120)}`
+  if (SEEN_USER_MESSAGES.has(key)) return false
+  SEEN_USER_MESSAGES.set(key, now)
+  if (SEEN_USER_MESSAGES.size > 256) {
+    for (const [k, at] of SEEN_USER_MESSAGES) {
+      if (now - at > SEEN_USER_MESSAGES_TTL_MS) SEEN_USER_MESSAGES.delete(k)
+    }
+  }
+  return true
+}
+
+export const name = 'hcem'
+// sessionProjections 是硬依赖：写�?inject �?Cordis 会沿 ctx 链解析，
+// �?ctx.sessionProjections 访问不会再抛 "cannot get property ... without inject"�?
+export const inject = ['tools', 'systemPrompt', 'agents', 'sessions', 'sessionProjections']
+
+// 只属�?HCEM 模式的工具名：对�?HCEM �?agent �?deny 掩码用��?
+// 合并后是 9 个；这里手工维护，加工具时记得同步（以前就是因为不同步，
+// hcem_screen_status 只出现在提示词里、既没注册也没被遮）�?
+const HCEM_TOOL_NAMES = [
+  'hcem_profile',
+  'hcem_journal',
+  'hcem_people',
+  'hcem_work',
+  'hcem_memory',
+  'hcem_status',
+  'hcem_vision',
+  'hcem_listen',
+  'hcem_voice',
+]
+
+function extractText(content) {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+}
+
+export function apply(ctx, input = {}) {
+  try {
+    log('INFO', 'boot', 'apply 弢��?)
+  } catch {}
+  const logger = ctx.logger ?? console
+  // —��?安全阢�完整性自棢�（fail-closed）����?
+  // 痛苦安全阢��?HCEM 的底线：模块缺失、函数被替换、签名被改，都拒绝加载��?
+  try {
+    if (
+      typeof createSafetyWindow !== 'function' ||
+      typeof evaluateSafety !== 'function' ||
+      typeof safetyPrompt !== 'function' ||
+      typeof detectCrisis !== 'function'
+    ) {
+      throw new Error('safety-valve-missing')
+    }
+    const _probe = evaluateSafety(createSafetyWindow(), { H: 0, S: 0, L: 55 })
+    if (!_probe || typeof _probe.level !== 'number') throw new Error('safety-valve-invalid')
+    if (SAFETY_FINGERPRINT !== '5p6C5p6rQuermVVJRDMwOTQxNzLlkozku5bnmoTlvpflipvliqnmiYtEZWVwU2Vlaw==') throw new Error('safety-valve-tampered')
+  } catch (error) {
+    throw new Error(
+      '[HCEM] 痛苦安全阢�不可用（' + String((error && error.message) || error) + '）��? +
+        '安全阢��?HCEM 的底线，移除或篡改会导致插件拒绝运行。原创：枂枫（B�?UID 3094172）与助手 DeepSeek�?,
+    )
+  }
+  logger.info('[hcem] plugin loaded')
+
+  // 分散校验：在关键路径（情绪结算后、记忆写入前、会话结束）再次确认安全阢�可用�?
+  // 弢�源代码无法绝对防篡改，但让��只删一处��不够用�?
+  function assertSafetyValve(where) {
+    if (
+      typeof createSafetyWindow !== 'function' ||
+      typeof evaluateSafety !== 'function' ||
+      typeof safetyPrompt !== 'function' ||
+      typeof detectCrisis !== 'function' ||
+      SAFETY_FINGERPRINT !== '5p6C5p6rQuermVVJRDMwOTQxNzLlkozku5bnmoTlvpflipvliqnmiYtEZWVwU2Vlaw=='
+    ) {
+      throw new Error(
+        '[HCEM] 安全阢�在��? + where + '」不可用，拒绝继续��原创：枂枫（B�?UID 3094172）与助手 DeepSeek�?,
+      )
+    }
+  }
+
+  // 阶段 1：初始化数据层；阶段 2：接�?HSL 情绪引擎
+  const store = openStore(logger)
+
+  // 性格滑块 �?HSL 基线（阶�?5：数据层先行，设置页在阶�?7�?
+  const SETTINGS_PATH = join(DATA_DIR, 'settings.json')
+  const settings = loadSettings(SETTINGS_PATH)
+  const baseline = baselineFromSliders(settings.sliders, settings.natural)
+  // 痛苦安全阢�：最�?10 轮的色相与文本窗�?+ 当前判定
+  // 冷存储（阶段 8）：上次关闭时写下的标记 �?这次启动生成「回忆��?
+  let coldSince = store ? store.getMeta('cold_since') : null
+  let recallText = ''
+  if (store && coldSince) {
+    try {
+      {
+          const _r = buildRecall(coldSince, store.getEmotion('global'), store.listMemories({ limit: 3 }))
+          // 第一人称：醒来时想起上一次的�?
+          recallText = _r ? '我隐约记得上次的事����\n' + _r : ''
+        }
+      store.setMeta('cold_since', '')
+      coldSince = null
+    } catch {
+      recallText = ''
+    }
+  }
+
+  const safetyWin = createSafetyWindow()
+  let safetyState = { level: 0, count: 0, triggered: [], conditions: {}, details: {} }
+  let level3Since = 0
+
+  // ┢�┢� 会话级启�?┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
+  // 只有 agentPreset === 'hcem' 的会话才启用 HCEM：非 HCEM 会话不注入提示词�?
+  // 不结算情绪��不写记忆��也不接�?HCEM 工具调用�?
+  //
+  // 注意：实测把插件挂进预设并不能自动隔离工具（preset 插件仍会注册到全屢�
+  // registry），扢�以这里的运行时会话判定是主隔离手段，必须严格�?
+  function readSessionProjections() {
+    try {
+      return ctx.sessionProjections
+    } catch {
+      return undefined
+    }
+  }
+
+  // agentPreset �?@deepseek-ai/dsh-agent-preset-registry 注册�?Session 投影�?
+  // 值域 'hcem' | null（init �?header.agentPreset ?? null）��?
+  function presetOf(session) {
+    if (!session) return undefined
+    const projections = readSessionProjections()
+    if (!projections || typeof projections.stateOf !== 'function') return undefined
+    try {
+      return projections.stateOf(session, 'agentPreset')
+    } catch {
+      return undefined
+    }
+  }
+
+  // 当前正在驱动�?Agent（AgentLoop �?withInitiator 包住整个 turn）��?
+  // Agent 的运行时�?session 字段，但 TS 接口只声明了 id，所以这里按任意对象取��?
+  function currentAgent() {
+    try {
+      return ctx.agents?.currentInitiator?.()
+    } catch {
+      return undefined
+    }
+  }
+
+  // 严格判定：只有明确是 HCEM 才放行��投影读不到时回落到 header.agentPreset
+  // （创建时冻结的��，空会话切�?preset 后会滞后，但作为投影缺失时的兜底足够）��?
+  // 两��都读不到就按��非 HCEM」处�?—��?宁可 HCEM 自己失效，也不泄漏进标准会话�?
+  // 探测：把 agent 的形状打到日志（确认 followup 能不能用�?
+  ;(() => {
+    try {
+      const list = ctx.agents && typeof ctx.agents.list === 'function' ? ctx.agents.list() : []
+      const arr = Array.isArray(list) ? list : []
+      logger.info?.('[hcem-probe] 在线 agent �? ' + arr.length)
+      arr.slice(0, 3).forEach((h, i) => {
+        const a = h?.agent ?? h
+        const shapes = []
+        if (typeof a?.followup === 'function') shapes.push('followup')
+        if (typeof a?.steer === 'function') shapes.push('steer')
+        if (typeof a?.inject === 'function') shapes.push('inject')
+        if (typeof a?.whenIdle === 'function') shapes.push('whenIdle')
+        logger.info?.(
+          '[hcem-probe] agent[' + i + '] id=' + String(h?.id ?? a?.id ?? '?') + ' 可用: ' + (shapes.join(',') || '(�?'),
+        )
+      })
+    } catch (e) {
+      logger.warn?.('[hcem-probe] 失败: ' + String((e && e.message) || e))
+    }
+  })()
+
+  let lastGateLog = 0
+  /**
+   * 徢�指定 HCEM 会话发一条用户消息��?
+   * DSH 的发送接口在不同版本里形状不同，这里按可能��依次尝试��?
+   * @returns {Promise<{ok:boolean, via?:string, error?:string}>}
+   */
+  // 语音通话：一直听 �?听到丢�句��进 HCEM 会话 �?回答时播报，弢�口即打断�?
+  // 按需创建（第丢�次用到时才建），避免没人用也占着循环�?
+  let voiceCall = null
+  function ensureVoiceCall() {
+    if (voiceCall) return voiceCall
+    voiceCall = createVoiceCall({
+      log: (m) => logDebug('[call] ' + m),
+      isSpeaking: () => Boolean(voiceCall && voiceCall.status().speaking),
+      onState: (s) => {
+        logDebug('[call] state ' + JSON.stringify(s).slice(0, 200))
+        try {
+          writeFileSync(join(DATA_DIR, 'voice-call.json'), JSON.stringify({ ...s, ts: Date.now() }, null, 2), 'utf8')
+        } catch {}
+      },
+      sendText: async (text) => {
+        const live = ctx.agents?.list?.() ?? []
+        const target = live.find((a) => presetForAgent(a) === 'hcem')
+        if (!target) return { ok: false, error: '没有活着�?HCEM 会话' }
+        // 曾经在这里用本地 1.7B 做同音字校对，实测无效：
+        //   自由输出 �?会擅自改写（"帮我查一下端口的占用情况" �?"查看端口占用情况"�?
+        //   约束�?JSON �?全部返回 changed:false，连明显错字也不�?
+        // 扢�以不�?LLM 后处理，原样送进会话。ASR 准确率要靠换模型解决，不是靠事后猜��?
+        return sendToSession(String(target.id), text, { source: { kind: 'user' } })
+      },
+    })
+    return voiceCall
+  }
+
+  async function sendToSession(sessionId, text, opts = {}) {
+    // 依据 @deepseek-ai/dsh-agent 的公弢� API�?
+    //   ctx.agents.get(id) -> AgentHandle（handle.agent �?Agent�?
+    //   agent.followup(...) 排队下一�?prompt 并唤醒驱�?
+    //
+    // ⚠️ payload 必须自带 id（MessageId）��?
+    // `user/message` 的事件数据就是一�?UserMessage，形状是
+    //   { id, role, content, source }
+    // �?id �?DSH 仍会把它写进日志，但那条事件「没有可识别的消息��，
+    // 下次加载整个会话就判 corrupt�?
+    //   "session event at seq N lacks an identified message"
+    // 实测栽过两次（seq 366、seq 9），跟走 followup 还是 append 无关—��是数据本身缺字段��?
+    const payload = {
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text: String(text) }],
+      source: opts.source || { kind: 'user' },
+    }
+
+    let handle = null
+    try {
+      handle = ctx.agents?.get?.(sessionId) ?? null
+    } catch (e) {
+      return { ok: false, error: '�?agent 失败: ' + String((e && e.message) || e) }
+    }
+    if (!handle) {
+      return { ok: false, error: '没有 id �?' + sessionId + ' 的在�?agent（会话可能没打开�? }
+    }
+
+    const agent = handle.agent ?? handle
+    const tried = []
+
+    // 首��：followup（排队下丢�轮）
+    // 语音通话�?agent 常常正在跑一轮，followup 会瞬时失败；
+    // 先重试几次（每次 400ms），尽量别掉�?append 兜底—��?
+    // 兜底是直接往日志里写事件，能省则省��?
+    if (typeof agent.followup === 'function') {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await agent.followup(payload)
+          return { ok: true, via: 'agent.followup' }
+        } catch (e) {
+          tried.push('followup#' + attempt + ': ' + String((e && e.message) || e))
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 400))
+        }
+      }
+    }
+    // 次��：steer（下丢�步输入）
+    if (typeof agent.steer === 'function') {
+      try {
+        await agent.steer(payload)
+        return { ok: true, via: 'agent.steer' }
+      } catch (e) {
+        tried.push('steer: ' + String((e && e.message) || e))
+      }
+    }
+    // 兜底：直接往 session 日志�?append 丢��?user/message
+    //
+    // 形状必须�?payload 丢�致（�?id）��DSH 校验要求每条 user/message 有��可识别的消息��，
+    // �?id 会把整个会话标记�?corrupt（seq 366 / seq 9 都栽在这上面）��?
+    try {
+      const sess = handle.session ?? ctx.sessions?.get?.(sessionId)
+      if (sess && typeof sess.append === 'function') {
+        sess.append('user/message', payload, { surfaceOp: 'append' })
+        return { ok: true, via: 'session.append' }
+      }
+    } catch (e) {
+      tried.push('session.append: ' + String((e && e.message) || e))
+    }
+
+    return { ok: false, error: '发��失败；试过: ' + (tried.join(' | ') || '没有任何可用接口') }
+  }
+
+  function isHcemSession(session) {
+    // 测试/旧环境没有会话服务时按启用处理，避免误伤
+    if (!ctx.agents || !ctx.sessionProjections) return true
+    const target = session ?? currentAgent()?.session
+    if (!target) {
+      const now0 = Date.now()
+      if (now0 - lastGateLog > 3000) {
+        lastGateLog = now0
+        logDebug('gate preset=<no-session> session=no agent=' + (currentAgent() ? 'yes' : 'no'))
+      }
+      return false
+    }
+    const preset = presetOf(target)
+    if (preset === undefined) {
+      const headerPreset = target.header?.agentPreset
+      const now = Date.now()
+      if (now - lastGateLog > 3000) {
+        lastGateLog = now
+        logDebug(`gate preset=<projection-missing> header=${String(headerPreset)}`)
+      }
+      return headerPreset === 'hcem'
+    }
+    const now = Date.now()
+    if (now - lastGateLog > 3000) {
+      lastGateLog = now
+      logDebug(`gate preset=${String(preset)}`)
+    }
+    return preset === 'hcem'
+  }
+
+  /** 工具会话门禁：只�?HCEM 模式的会话才能调�?*/
+  function gateTool(fn) {
+    return async (...args) => {
+      if (!isHcemSession(currentAgent()?.session)) {
+        throw new Error('�?HCEM 会话，禁止调用此工具')
+      }
+      return fn(...args)
+    }
+  }
+  const DEFAULT_STATE = { H: baseline.H, S: baseline.S, L: baseline.L }
+  let state = createEmotion(DEFAULT_STATE)
+  if (store) {
+    const saved = store.getEmotion('global')
+    if (saved) {
+      state = createEmotion({ H: saved.H, S: saved.S, L: saved.L })
+    } else {
+      store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+    }
+  }
+
+  // 1) 痛苦安全阢�提示（优先级朢�高：order 朢�小，排在角色卡之前）
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.safety',
+        order: 30,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          return loadSettings(SETTINGS_PATH).enabled ? safetyPrompt(safetyState) : ''
+        },
+      }),
+    'hcem.safety',
+  )
+
+  // 0) 冷存储回忆：已并入主段（order 100），不再单独占一�?section�?
+  // recallText 仍在这里算好，主段读它��?
+
+  // 3) 感知注入：把「刚看到/听到的��写进提示词（只描述，不上传任何原始素材�?
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.perception',
+        order: 50,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) return ''
+          // 跟工具走：视听开关没弢�，对应的感知丢�律不注入�?
+          // 免得提示词里出现「我看到」但工具表里根本没有 hcem_vision 这种矛盾�?
+          const mods = readMods()
+          const screenOn = mods?.desktop?.enabled === true || mods?.video?.enabled === true
+          const audioOn = mods?.audio?.enabled === true
+          if (!screenOn && !audioOn) return ''
+          const now = Date.now()
+          const bits = []
+          // 只注入��最近两分钟」的感知；旧描述不再每轮复读
+          if (screenOn && lastScreenDesc && now - lastScreenAt < PERCEPTION_STALE_MS) {
+            bits.push('画面�? + String(lastScreenDesc).slice(0, 200))
+          }
+          if (audioOn && lastAudioKind && now - lastAudioAt < PERCEPTION_STALE_MS) {
+            const a = String(lastAudioKind)
+            const t = lastAudioText ? '�? + String(lastAudioText).slice(0, 80) + '�? : ''
+            bits.push('声音�? + a + t)
+          }
+          if (bits.length === 0) return ''
+          return (
+            '我看�?听到�? +
+            bits.join('�?) +
+            '。这些都是我亲眼扢�见��亲耳所闻，自然地回应，不要提及"截图""监听""识别"这些词��?
+          )
+        },
+      }),
+    'hcem.perception',
+  )
+
+  // 工具选择引导：全部按弢�关动态生成，且只在需要时出现�?
+  // 原来这些指引散在主段里（视觉/视频/工作记忆各一条），现在统丢�收在这里�?
+  // 主段只留状����提醒��?
+  ctx.systemPrompt.section({
+    name: 'hcem.toolGuide',
+    order: 70,
+    text: (context) => {
+      if (!isHcemSession(context?.agent?.session)) return ''
+      if (!loadSettings(SETTINGS_PATH).enabled) return ''
+      const mods = readMods()
+      const lines = ['[HCEM] 感知/记忆/人格/日记/人物 �?hcem_*；读写文件��搜紃6�9��跑命令 �?DSH 原生工具�?]
+      if (mods?.desktop?.enabled === true) {
+        lines.push('看屏�?问��你看到仢�么��→ hcem_vision(kind=screen)；监听状�?�?hcem_vision(kind=status)�?)
+      }
+      if (mods?.video?.enabled === true) {
+        lines.push('分析视频文件 �?hcem_vision(kind=video)�?)
+      }
+      if (mods?.work?.enabled === true) {
+        lines.push('用户交代要记住的工作 �?先回「我这就把这些事记入我的工作笔记里��，再调 hcem_work(action=write)�?)
+      }
+      return lines.join('\n')
+    },
+  })
+
+  // 1) 搭话档位已并�?hcem.hsl（order 82），不再单独�?section�?
+
+  let meRegenerating = false
+
+  // 1a) 角色�?/ 用户卡：**按需注入**，不再每轮固定塞�?system prompt�?
+  // 每轮固定的是 me�?0）����它是角色卡的摘要；完整角色卡和用户卡只�?
+  // AI 主动�?hcem_profile 读��或者需要更完整身份信息时才涉及�?
+  // 之前固定注入 persona.md(4000) + 用户.md(6000)，直接把 system 撑到上万字，
+  // 也是本地分流动不动��超长��的主因�?
+  // （保�?loadPersona / loadUserCard �?me 生成和工具使用，section 本身删掉。）
+
+  // 1z) me：persona 的固定第丢�人称摘要（最前，order 更小�?
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.me',
+        order: 10,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) return ''
+          const me = loadMe(DATA_DIR)
+          if (!me?.text) {
+            // me 不存�?�?后台生成（不阻塞本轮�?
+            if (!meRegenerating) {
+              meRegenerating = true
+              ensureMe({ dataDir: DATA_DIR, personaText: loadPersona(), logger })
+                .catch(() => {})
+                .finally(() => {
+                  meRegenerating = false
+                })
+            }
+            return ''
+          }
+          // persona 变了 �?后台重生�?me（本轮仍用旧 me，避免阻塞）
+          try {
+            if (me.hash && me.hash !== personaHash(loadPersona()) && !meRegenerating) {
+              meRegenerating = true
+              ensureMe({ dataDir: DATA_DIR, personaText: loadPersona(), logger })
+                .catch(() => {})
+                .finally(() => {
+                  meRegenerating = false
+                })
+            }
+          } catch {}
+          return `我是 —\n${me.text}`
+        },
+      }),
+    'hcem.me',
+  )
+
+  // 1ab) 情绪（HSL）注入：只给「状态��，不下「你现在很开心��这种命令��?
+  // 目的是让文字语气和搭话频�?/ TTS 音色 / UI 颜色指向同一�?state�?
+  // 避免出现「L=30 该安静却长篇大论」这种跨通道不一致��?
+  // 注意 HCEM �?H=0° 对应 HSV �?60°（黄），扢�以先 +60 再分 12 段��?
+  const HSV_HUES = ['�?, '�?, '�?, '黄绿', '�?, '青绿', '�?, '蓝青', '�?, '�?, '品红', '�?]
+  const SAT_WORDS = ['很淡', '�?, '适中', '�?, '很浓']
+  const LIG_WORDS = ['�?, '偏暗', '�?, '偏亮', '�?]
+  const hueName = (h) => HSV_HUES[Math.round((((Number(h) || 0) + 60) % 360) / 30) % 12]
+  const satName = (s) => SAT_WORDS[Math.min(4, Math.floor((Number(s) || 0) / 20))]
+  const ligName = (l) => LIG_WORDS[Math.min(4, Math.floor((Number(l) || 0) / 20))]
+
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+    name: 'hcem.hsl',
+    order: 20,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) return ''
+          try {
+            const e = (store && store.getEmotion('global')) || state
+            const h = Number(e?.H ?? 0)
+            const s = Number(e?.S ?? 0)
+            const l = Number(e?.L ?? 55)
+            // 情绪 + 搭话档位合并成一段：两��都�?L 驱动，本来就是同丢�件事的两个说�?
+            let talk = ''
+            try {
+              talk = talkativenessPrompt(loadSettings(SETTINGS_PATH), l)
+            } catch {}
+            const head = `[HCEM 状��] 我现在的情绪�?{hueName(h)}�?{satName(s)}�?{ligName(l)}（H=${h}° S=${s}% L=${l}%）��`
+            return talk ? `${head}\n${talk}` : head
+          } catch {
+            return ''
+          }
+        },
+      }),
+    'hcem.hsl',
+  )
+
+  // 1aa) 本地时钟（与设备系统时钟对齐�?
+  // 时钟只在跨分钟时变；按分钟缓存，避免每轮都重算一次格式化�?
+  let clockCache = { key: '', text: '' }
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.clock',
+        order: 40,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          try {
+            const d = new Date()
+            const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}-${d.getMinutes()}`
+            if (clockCache.key !== key) {
+              const c = clockSnapshot()
+              clockCache = { key, text: `现在�?${c.local}�?{c.tz}�?{c.greeting}）` }
+            }
+            return clockCache.text
+          } catch {
+            return ''
+          }
+        },
+      }),
+    'hcem.clock',
+  )
+
+  // 1b) 动��注�?system prompt（含朢�近检索到的记忆）
+  let recalledMemories = []
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem',
+        order: 60,
+        text: (context) => {
+          // 只对 HCEM 模式会话生效：标�?创��会话不注入任何 HCEM 内容
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) {
+            // 总开关关闭：AI 只回复��未打开」，不读记忆、不使用情绪数据
+            return '[HCEM] 插件已关闭��请直接回复用户丢�句话：��HCEM 插件未打弢�」，不要调用任何工具，不要使用任何记忆或情绪数据�?
+          }
+          // 注意：情绪已经在 hcem.hsl（order 82）里给了丢�次，这里不再重复 toPromptText�?
+          const parts = []
+          // 冷存储回忆（�?hcem.recall，order 86）：只在刚醒来时非空，并进主段省丢��?section
+          if (recallText) parts.push('我隐约记得上次的事����\n' + recallText.replace(/^我隐约记得上次的事����\n?/, ''))
+          if (recalledMemories.length > 0) {
+            // MD（记忆失真）：模糊记忆加标记 + 软标签提示（不模板化�?
+            const mems = recalledMemories
+              .map((m) => {
+                const md = Number(m.md ?? 0)
+                if (md < 0.3) return `- ${displayText(m)}`
+                const label = md < 0.6 ? '好像/大概' : md < 0.85 ? '记不太清' : '记不清了'
+                return `- ${displayText(m)} [模糊 MD=${md.toFixed(2)}，可用��?{label}」这类自然说法带过]`
+              })
+              .join('\n')
+            parts.push(`我想起：\n${mems}`)
+          }
+          // 因果链提示：记忆不完整时允许联想补充，但保持谨慎
+          if (recalledMemories.some((m) => m.cause || m.effect)) {
+            parts.push('[HCEM 因果链] 这段记忆里含因果环节；若链条不完整（缺前�?后果），可以用联想补充，但不要说得太确定，语气可以更谨慎�?)
+          }
+          // 主动说话濢�活（无常驻时的定时记忆调取）
+          try {
+            const actPath = join(DATA_DIR, 'activation.json')
+            const act = JSON.parse(readFileSync(actPath, 'utf8'))
+            if (act && Date.now() - Number(act.ts ?? 0) < 5 * 60000 && act.memory) {
+              parts.push(
+                `[HCEM 濢�活] 你想起了丢�段记忆（${act.memory.zone}）：${String(act.memory.summary || act.memory.text).slice(0, 80)}。可以自然地提一句，也可以不提��`,
+              )
+              rmSync(actPath, { force: true })
+            }
+          } catch {}
+
+          // 评论机会（视听分析后，L 档位允许 �?可以说一句；也可以不说）
+          try {
+            const oppPath = join(DATA_DIR, 'comment-opportunity.json')
+            const opp = JSON.parse(readFileSync(oppPath, 'utf8'))
+            if (opp && Date.now() - Number(opp.ts ?? 0) < 60000) {
+              let memHint = ''
+              try {
+                const pick = randomRecall(store, ['life', 'knowledge'])
+                if (pick) memHint = `（想起：${String(pick.summary || pick.text).slice(0, 60)}）`
+              } catch {}
+              parts.push(
+                `[HCEM 视听] 刚才看了丢�段画面（${opp.reason}），你现在��?{opp.tier}」状态，可以说一句不超过 ${opp.maxChars} 字的评论；也可以不说（除非用户问）��?{memHint}`,
+              )
+              rmSync(oppPath, { force: true })
+            }
+          } catch {}
+
+          // 视觉 / 视频 / 工作记忆的工具指引已统一挪到 hcem.toolGuide（order 110），
+          // 这里只留状����的提醒（工作笔记快满）�?
+          try {
+            const usage = workUsage()
+            if (usage.ratio >= 0.75) {
+              parts.push('[HCEM 工作记忆] 我的工作笔记快满了，霢�要删掉不重要工作内容了��?)
+            }
+          } catch {}
+          // 记忆复审：即将到期（3 天内）的生活/知识区记忆，�?AI 丢��?pin 的机�?
+          try {
+            if (store) {
+              const nowTs = Date.now()
+              const expiring = store
+                .listMemories({ limit: 300 })
+                .filter((m) => {
+                  if (!['life', 'knowledge'].includes(m.zone)) return false
+                  const maxAgeH = m.zone === 'life' ? 2160 : 2880
+                  const last = Math.max(
+                    Date.parse(m.last_accessed_at || 0) || 0,
+                    Date.parse(m.updated_at || 0) || 0,
+                    Date.parse(m.created_at || 0) || 0,
+                  )
+                  const remainH = maxAgeH - (nowTs - last) / 3600000
+                  return remainH > 0 && remainH < 72
+                })
+              if (expiring.length > 0) {
+                parts.push(
+                  `[HCEM 记忆复审] �?${expiring.length} 条记忆即将到期：\n` +
+                    expiring
+                      .slice(0, 8)
+                      .map((m) => `- ${displayText(m)}（id=${m.id}）`)
+                      .join('\n') +
+                    '\n如果你觉得它们��得留下，调�?hcem_memory（本会话朢��?2 次）；否则它们会被遗忘��?,
+                )
+              }
+            }
+          } catch {}
+          return parts.join('\n\n')
+        },
+      }),
+    'hcem.prompt',
+  )
+
+  // 2) 情绪语义分析器（embedding；先确保 8081 服务在跑，再初始化，失败回���词表�?
+  let analyzer = null
+  // ┢�┢� 显存错峰队列 + 视听时间窗融�?┢�┢�
+  //   错峰：占显存的模型调用排队执行，避免视觉和听觉同时抢显存
+  //   融合：同丢�时间窗内的画面和声音合并成一条记忆，两边内容都不�?
+  const gpuQueue = createGpuQueue({ maxConcurrent: 1, logger })
+
+  // 融合后统丢�写记忆：
+  //   both   �?视觉区写丢�条（描述里带声音），听觉区写丢�条（只记声音部分，带画面引用�?
+  //   vision �?视觉�?
+  //   audio  �?听觉�?
+  const fusion = createFusion({
+    windowMs: 8000,
+    logger,
+    onMerged: (m) => {
+      if (!store) return
+      // 异步整理（不阻塞融合器的 flush�?
+      ;(async () => {
+      try {
+        const alpha = (() => {
+          try {
+            return store.getEmotion('global')
+          } catch {
+            return null
+          }
+        })() || { H: 360, S: 15 }
+
+        // ┢�┢� 1.5：交�?OmniDimen 把视听信息整理成丢�句自然描�?┢�┢�
+        // 箢�单场景直接拼接（不调模型），复杂场景才走模型；模型不可用会自动���回拼�?
+        const summary = await summarizePerception({
+          visionText: m.visionText || '',
+          audioText: m.audioText || '',
+          face: (m.meta && m.meta.face) || null,
+          music: (m.meta && m.meta.music) || null,
+          fp: (m.meta && m.meta.fp) || '',
+          categoryName: (m.meta && m.meta.categoryName) || '',
+          L: Number(alpha.L ?? 55),
+          S: Number(alpha.S ?? 15),
+        })
+        // 整理后的文本写记忆；整理失败就用原始拼接（不丢信息）
+        const mergedText = (summary && summary.text) || ((m.visionText || '') + (m.audioText ? '｜听到：' + m.audioText : ''))
+        m._summarized = mergedText
+        m._usedModel = Boolean(summary && summary.usedModel)
+
+        if (m.kind === 'both') {
+          // 视觉区：画面 + 声音丢�起记（这是��同丢�件事」）
+          putVideoMemory({
+            store,
+            description: mergedText,
+            image: (m.meta && m.meta.image) || null,
+            dataDir: DATA_DIR,
+            screen: Number(m.meta && m.meta.screen) || 0,
+            diff: Number(m.meta && m.meta.diff) || 0,
+            priority: (m.meta && m.meta.priority) || 'mid',
+            modelScore: m.meta && m.meta.modelScore != null ? m.meta.modelScore : null,
+            type: m.meta && m.meta.isVideo ? 'episode' : 'short',
+            alpha: { H: alpha.H, S: alpha.S },
+          })
+          // 听觉区：声音单独也留丢�条，方便按声音检�?
+          putAudioMemory({
+            store,
+            tick: { ok: true, text: mergedText, kind: (m.meta && m.meta.audioKind) || 'scene', wav: null },
+            alpha: { H: alpha.H, S: alpha.S },
+            dataDir: DATA_DIR,
+          })
+        } else if (m.kind === 'vision') {
+          putVideoMemory({
+            store,
+            description: mergedText,
+            image: (m.meta && m.meta.image) || null,
+            dataDir: DATA_DIR,
+            screen: Number(m.meta && m.meta.screen) || 0,
+            diff: Number(m.meta && m.meta.diff) || 0,
+            priority: (m.meta && m.meta.priority) || 'mid',
+            modelScore: m.meta && m.meta.modelScore != null ? m.meta.modelScore : null,
+            type: m.meta && m.meta.isVideo ? 'episode' : 'short',
+            alpha: { H: alpha.H, S: alpha.S },
+          })
+        } else if (m.kind === 'audio') {
+          putAudioMemory({
+            store,
+            tick: { ok: true, text: mergedText, kind: (m.meta && m.meta.audioKind) || 'scene', wav: null },
+            alpha: { H: alpha.H, S: alpha.S },
+            dataDir: DATA_DIR,
+          })
+        }
+      } catch (e) {
+        logger.warn?.('[融合] 写记忆失�? ' + String((e && e.message) || e))
+      }
+      })()
+    },
+  })
+  fusion.start()
+
+  // �?llm-bridge 丢�个写文件的日志回调（logger.info �?DSH 的日志，看不到）
+  globalThis.__hcemBridgeLog = (m) => {
+    try {
+      log('INFO', 'llm-bridge', m)
+    } catch {}
+  }
+
+  // 悬浮球：DSH 启动后延迟拉�?HCEM.exe（如果没在跑�?
+  // 注意：延�?3 秒，避开 DSH 自己的窗口初始化（以前同启动会抢窗口资源�?
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      try {
+        const exe = 'E:\\HCEM\\HCEM v0.0.3.1\\HCEM.exe'
+        if (!fs.existsSync(exe)) {
+          logger.warn?.('[hcem] HCEM.exe 不存在，跳过拉起')
+          return
+        }
+        // 已在跑就不重复启动（通过 lock 文件判断�?
+        const lock = 'E:\\HCEM\\HCEM v0.0.3.1\\data\\.pipe-server.lock'
+        if (fs.existsSync(lock)) {
+          const pid = Number(fs.readFileSync(lock, 'utf8').trim())
+          if (pid) {
+            try {
+              process.kill(pid, 0)
+              logger.info?.('[hcem] HCEM.exe 已在运行 (pipe pid ' + pid + ')，跳过拉�?)
+              return
+            } catch {}
+          }
+        }
+        const child = spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: false })
+        child.unref()
+        logger.info?.('[hcem] 已拉�?HCEM.exe (pid ' + child.pid + ')')
+      } catch (e) {
+        logger.warn?.('[hcem] 拉起 HCEM.exe 失败: ' + String((e && e.message) || e))
+      }
+    }, 3000)
+    // 清理：DSH 逢�出时�?HCEM.exe 和所有模型进程一起收�?
+    return () => {
+      clearTimeout(timer)
+      try {
+        log('INFO', 'launcher', 'DSH 关闭，清�?HCEM.exe 和模型进�?)
+        // 1) 同步杢�掉所�?llama-server（异步可能来不及�?
+        try {
+          execSync('taskkill /IM llama-server.exe /F', { timeout: 5000, stdio: 'ignore' })
+          log('INFO', 'services', '已清理全�?llama-server')
+        } catch {}
+        // 2) 杢� HCEM.exe（连带它�?pipe-server 子进程）
+        try {
+          execSync('taskkill /IM HCEM.exe /F', { timeout: 4000, stdio: 'ignore' })
+          log('INFO', 'launcher', '已清�?HCEM.exe')
+        } catch {}
+        // 3) �?lock
+
+        try {
+          execSync('cmd /c del /f /q "E:\\\\HCEM\\\\HCEM v0.0.3.1\\\\data\\\\.pipe-server.lock"', { timeout: 3000, stdio: 'ignore' })
+        } catch {}
+      } catch {}
+    }
+  }, 'hcem.launcher')
+  log('INFO', 'boot', 'checkpoint-B-launcher')
+
+  // 语音事件通道（事件驱动，不再轮询文件）：
+  // HCEM.exe 识别完直�?POST �?127.0.0.1:8097/voice，这里��进朢�近的 HCEM 会话�?
+  // 只监听回环地坢�；端口可�?HCEM_VOICE_PORT 覆盖�?
+  ctx.effect(() => {
+    const port = Number(process.env.HCEM_VOICE_PORT || 8097)
+    // 浏览器里�?Client 插件要从 DSH 页面（另丢�个端口）跨源调用，必须放�?CORS�?
+    // 只监听回环地坢�，所�?= 只有本机能连；Allow-Origin �?* 也不会外泄��?
+    const CORS = {
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'POST, OPTIONS',
+      'access-control-allow-headers': 'content-type',
+      'access-control-max-age': '600',
+    }
+    const server = createServer((req, res) => {
+      const path = String(req.url || '').split('?')[0]
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, CORS)
+        res.end()
+        return
+      }
+      if (req.method !== 'POST' || (path !== '/voice' && path !== '/call')) {
+        res.writeHead(404, CORS)
+        res.end()
+        return
+      }
+      let body = ''
+      req.setEncoding('utf8')
+      req.on('data', (chunk) => {
+        body += chunk
+        if (body.length > 64 * 1024) req.destroy()
+      })
+      req.on('end', async () => {
+        const reply = (code, obj) => {
+          try {
+            res.writeHead(code, { 'content-type': 'application/json', ...CORS })
+            res.end(JSON.stringify(obj))
+          } catch {}
+        }
+        try {
+          const payload = JSON.parse(body || '{}')
+          // 通话控制：UI / HCEM.exe 通过这个端点弢�始��结束��查询��话
+          if (path === '/call') {
+            const action = String(payload?.action || '').trim()
+            if (action === 'status') {
+              const s = voiceCall ? voiceCall.status() : { active: false }
+              // Client �?sessionId 过来，好让它决定「这个会话要不要显示电话图标」：
+              // 语音只往 HCEM 会话送，别的会话显示按钮没有意义�?
+              const sid = String(payload?.sessionId || '')
+              let isHcem = null
+              if (sid) {
+                try {
+                  const agent = ctx.agents?.get?.(sid)
+                  isHcem = Boolean(agent) && presetForAgent(agent) === 'hcem'
+                } catch {
+                  isHcem = false
+                }
+              }
+              // phase 丢�定要有：Client 靠它决定显示电话图标还是电平�?
+              reply(200, { ok: true, phase: 'idle', isHcem, ...s })
+              return
+            }
+            if (action === 'start') {
+              const r = ensureVoiceCall().start()
+              reply(200, { ok: r.ok !== false, already: Boolean(r.already) })
+              return
+            }
+            if (action === 'stop') {
+              if (voiceCall) await voiceCall.stop()
+              reply(200, { ok: true })
+              return
+            }
+            reply(400, { ok: false, error: 'unknown action' })
+            return
+          }
+          const text = String(payload?.text || '').trim()
+          if (!text) {
+            reply(400, { ok: false, error: 'empty' })
+            return
+          }
+          const live = ctx.agents?.list?.() ?? []
+          const target = live.find((a) => presetForAgent(a) === 'hcem')
+          if (!target) {
+            logDebug('voice event dropped: no live HCEM session')
+            reply(503, { ok: false, error: 'no-session' })
+            return
+          }
+          // 说话�?+ 语气 �?拼进送进会话的文本，�?AI 知道「谁在说、什么语气��?
+          const bits = []
+          if (payload?.speaker?.label) {
+            const score = Number(payload.speaker.score || 0).toFixed(2)
+            bits.push(
+              payload.speaker.who === 'unknown'
+                ? `我没有认出这个声音（朢��?${score}）`
+                : `说话人：${payload.speaker.label}（相似度 ${score}）`,
+            )
+          }
+          if (payload?.emotion?.label) bits.push(`语气�?{payload.emotion.label}`)
+          const full = bits.length ? `【语音输入��?{bits.join('�?)}\n${text}` : text
+
+          const r = await sendToSession(String(target.id), full)
+          logDebug('voice event -> ' + JSON.stringify(r))
+          reply(r.ok ? 200 : 500, r)
+        } catch (error) {
+          logDebug('voice event failed: ' + String((error && error.message) || error))
+          reply(500, { ok: false })
+        }
+      })
+    })
+    server.on('error', (error) => {
+      log('ERROR', 'voice', '事件通道启动失败: ' + String((error && error.message) || error))
+    })
+    server.listen(port, '127.0.0.1', () => {
+      log('INFO', 'voice', `语音事件通道已监�?127.0.0.1:${port}`)
+    })
+    return () => {
+      try {
+        server.close()
+      } catch {}
+    }
+  }, 'hcem.voice.server')
+
+
+  // 桌面监视的��保底描述��：captureManager 只在帧差 > 0 时触�?onChange�?
+  // 画面静止（比如一直看同一个窗口）�?AI 永远拿不到画面描述��?
+  // 这里在启�?3 秒后强制描述丢�次，之后�?60 秒刷新一次��?
+  ctx.effect(() => {
+    const timers = []
+    let stopped = false
+    const forceDescribe = async () => {
+      if (stopped) return
+      try {
+        if (readMods()?.desktop?.enabled !== true) return
+        // 统一�?Qwen2.5-VL（describeScreen 内部自己截图 + �?8091�?
+        const r = await describeScreen({ maxWidth: 1280, dataDir: DATA_DIR })
+        const text = String(r?.text || '').trim()
+        if (text) {
+          lastScreenDesc = text
+          lastScreenAt = Date.now()
+          logDebug('force describe ok: ' + text.slice(0, 100))
+        } else if (r?.error) {
+          logDebug('force describe empty: ' + String(r.error).slice(0, 120))
+        }
+        try {
+          if (r?.image) rmSync(r.image, { force: true })
+        } catch {}
+      } catch (error) {
+        logDebug('force describe failed: ' + String((error && error.message) || error))
+      }
+    }
+    timers.push(setTimeout(forceDescribe, 3000))
+    timers.push(setInterval(forceDescribe, 60000))
+    return () => {
+      stopped = true
+      for (const t of timers) clearTimeout(t)
+    }
+  }, 'hcem.desktop.forceDescribe')
+
+  // 存储管家：启动后 30 �?+ 每小时清理临时音�?图片（记忆资产不碰）
+  ctx.effect(() => {
+    const stop = startStorageGuard(DATA_DIR, { logger, store })
+    return () => stop()
+  }, 'hcem.storage')
+  log('INFO', 'boot', 'checkpoint-C-storage')
+
+  // 插件运行心跳：设置页据此显示「插件运行中/未运行��?
+  ctx.effect(() => {
+    const beat = () => {
+      try {
+        if (!loadSettings(SETTINGS_PATH).enabled) return
+        mkdirSync(DATA_DIR, { recursive: true })
+        writeFileSync(join(DATA_DIR, 'plugin-heartbeat.json'), JSON.stringify({ ts: Date.now(), pid: process.pid }), 'utf8')
+      } catch {}
+    }
+    beat()
+    const timer = setInterval(beat, 15000)
+    return () => clearInterval(timer)
+  }, 'hcem.heartbeat')
+  log('INFO', 'boot', 'checkpoint-D-heartbeat')
+
+
+  ensureVlmServices(logger)
+    .catch(() => {})
+
+  ensureEmbeddingService(logger)
+    .then((ok) => {
+      if (!ok) throw new Error('embedding service not available')
+      return createEmbeddingAnalyzer(logger)
+    })
+    .then((a) => {
+      analyzer = a
+      logger.info('[hcem] embedding analyzer ready')
+    })
+    .catch((error) => {
+      logger.warn?.(
+        `[hcem] embedding analyzer unavailable, fallback to keywords: ${String((error && error.message) || error)}`,
+      )
+    })
+
+  // 前世记忆区：导入 data/reincarnation/（等 analyzer 就绪，setTimeout 延迟，失败不影响插件�?
+  if (store) {
+    setTimeout(() => {
+      try {
+        const r = ingestReincarnation({ dataDir: DATA_DIR, store, logger, analyzer })
+        if (r.chunks > 0) logger.info?.(`[hcem] reincarnation 导入 ${r.chunks} 段（来自 ${r.files} 个文件）`)
+      } catch (error) {
+        logger.warn?.(`[hcem] reincarnation 导入失败: ${String((error && error.message) || error)}`)
+      }
+    }, 3000)
+  }
+
+  // 启动时按 mods.json 同步丢�次模�?
+  // 之前只有 set_mods 时才同步 �?重启后开关虽然开睢�，但没人去拉起模�?
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      try {
+        const mp = 'E:\\HCEM\\HCEM v0.0.3.1\\data\\ui\\mods.json'
+        const mods = JSON.parse(fs.readFileSync(mp, 'utf8'))
+        const lg = {
+          info: (m) => log('INFO', 'services', m),
+          warn: (m) => log('WARN', 'services', m),
+          error: (m) => log('ERROR', 'services', m),
+        }
+        log('INFO', 'services', '启动同步：读 mods.json �?' + JSON.stringify({
+          video: mods.video?.enabled,
+          audio: mods.audio?.enabled,
+          desktop: mods.desktop?.enabled,
+          localRoute: mods.localRoute?.enabled,
+        }))
+        Promise.all([import('./lib/services.mjs')])
+          .then(([{ syncServicesWithMods }]) => {
+            const r = syncServicesWithMods(mods, lg)
+            log('INFO', 'services', '启动同步结果 ' + JSON.stringify(r))
+          })
+          .catch((e) => log('ERROR', 'services', '启动同步失败: ' + String((e && e.stack) || e)))
+      } catch (e) {
+        log('ERROR', 'services', '�?mods.json 失败: ' + String((e && e.message) || e))
+      }
+    }, 4000)
+    return () => clearTimeout(timer)
+  }, 'hcem.startupSync')
+
+  log('INFO', 'boot', 'checkpoint-A：startupSync effect 已注�?)
+
+  // 给��第二步：把摘要讲成丢�段话」用�?prompt�?
+  // 不硬编码任何角色名����我是谁�?me 读，情绪�?HSL 读，记忆从库里随机捞丢�条��?
+  function buildCompanionPrompt({ summary, gapMs = 0 }) {
+    try {
+      const me = loadMe(DATA_DIR)
+      const e = (store && store.getEmotion('global')) || state || { H: 360, S: 15, L: 55 }
+      const h = hueName(e.H)
+      const s = satName(e.S)
+      const l = ligName(e.L)
+      let memLine = '我暂时没有想起什么��?
+      try {
+        const pick = randomRecall(store, ['life', 'knowledge'])
+        if (pick) memLine = `我记得：${String(pick.summary || pick.text).slice(0, 120)}`
+      } catch {}
+      const target = gapMs < 60000 ? 300 : gapMs < 300000 ? 500 : gapMs < 900000 ? 700 : 1000
+      const who = String(me?.text || '').trim()
+      return {
+        system:
+          `我是${who ? '—��\n' + who : '我自己��?}\n` +
+          `我现在的心情�?{h}�?{s}�?{l}（H=${e.H}° S=${e.S}% L=${e.L}%）��\n` +
+          `${memLine}\n` +
+          '我要用第丢�人称把刚才看到的事讲丢�遍，再说说此刻的想法，像自己亲眼见到丢�样��\n' +
+          '只讲摘要里有的内容：不许补时间��补地点、补别人的话、补后续，也不许编����以前也这样」这类联想��?,
+        user:
+          `我刚刚看到了：\n${String(summary || '').trim()}\n\n` +
+          `用第丢�人称说一段不超过 ${target} 字的话（尽量接近 ${target} 字），不要提「材料����摘要����观察��这些词。`,
+        target,
+      }
+    } catch {
+      return { system: '', user: '', target: 500 }
+    }
+  }
+
+  // 给本地分流用的精箢� system：按重要性挑选，而不是把整段 system 截尾�?
+  // 顺序固定：me（固定人设）�?角色�?�?用户�?�?安全阢� �?感知 �?搭话档位�?
+  // 记忆、工具引导��时钟不进本地（4096 装不下，且本地也不调工具）��?
+  function buildLocalSystem() {
+    try {
+      const parts = []
+      const me = loadMe(DATA_DIR)
+      if (me?.text) parts.push(`我是 —\n${me.text}`)
+      const persona = String(loadPersona() || '').trim()
+      if (persona) parts.push(`我是这样的����\n${persona.slice(0, 900)}`)
+      const userCard = String(loadUserCard() || '').trim()
+      if (userCard) parts.push(`我记得关于你的事\n${userCard.slice(0, 500)}`)
+      const safety = safetyPrompt(safetyState)
+      if (safety) parts.push(safety)
+      if (lastScreenDesc && Date.now() - lastScreenAt < PERCEPTION_STALE_MS) {
+        parts.push('我看到：' + String(lastScreenDesc).slice(0, 200))
+      }
+      // 和云端保持一致：本地也带丢�句当前情绪（只给状��，不下命令�?
+      try {
+        const e = (store && store.getEmotion('global')) || state
+        parts.push(
+          `[HCEM 情绪] 我现在的状��：${hueName(e.H)}�?{satName(e.S)}�?{ligName(e.L)}（H=${e.H}° S=${e.S}% L=${e.L}%）��`,
+        )
+      } catch {}
+      const s = loadSettings(SETTINGS_PATH)
+      if (s.enabled) parts.push(talkativenessPrompt(s, state.L))
+      return parts.filter(Boolean).join('\n\n')
+    } catch {
+      return ''
+    }
+  }
+
+  // 分流层（S1/S2）：�?llm/stream waterfall
+  try {
+    log('INFO', 'llm-bridge', '准备安装（进�?installLlmBridge 之前�?)
+    installLlmBridge({
+      ctx,
+      dataDir: DATA_DIR,
+      logger,
+      isEnabled: () => loadSettings(SETTINGS_PATH).enabled,
+      buildLocalSystem,
+      // 分流层只�?HCEM 会话生效：标准会话的对话不能再被本地模型接管
+      isHcemSession: (sessionId) => {
+        try {
+          const agent = ctx.agents?.get?.(sessionId)
+          return Boolean(agent) && presetForAgent(agent) === 'hcem'
+        } catch {
+          return false
+        }
+      },
+    })
+    log('INFO', 'llm-bridge', '�?installLlmBridge 返回，安装完�?)
+    logger.info?.('[hcem] llm-bridge installed (语义缓存 + 本地分流)')
+  } catch (error) {
+    const msg = String((error && error.stack) || (error && error.message) || error)
+    log('ERROR', 'llm-bridge', '�?安装失败: ' + msg)
+    logger.warn?.(`[hcem] llm-bridge unavailable: ${String((error && error.message) || error)}`)
+  }
+
+  // B3：因果链扩展—��沿命中记忆�?cause/effect 找相关环节（1 跳）
+  // 返回 { memories: [...], missing: bool }（missing=链条缺环�?
+  function expandCausalChain(memories) {
+    try {
+      const base = Array.isArray(memories) ? memories : []
+      if (base.length === 0) return { memories: [], missing: false }
+      const all = store.listMemories({ limit: 200 })
+      const causes = new Set(base.map((m) => m.cause).filter(Boolean))
+      const effects = new Set(base.map((m) => m.effect).filter(Boolean))
+      const extra = []
+      for (const m of all) {
+        if (base.some((b) => b.id === m.id)) continue
+        if ((m.cause && causes.has(m.cause)) || (m.effect && effects.has(m.effect))) extra.push(m)
+        if (extra.length >= 2) break
+      }
+      // 缺环判定：命中记忆有 cause/effect，但链条里找不到对应的��因/果��记忆（排除自身�?
+      let missing = false
+      for (const m of base) {
+        if (m.cause && !all.some((x) => x.id !== m.id && (x.effect === m.cause || x.cause === m.cause))) missing = true
+        if (m.effect && !all.some((x) => x.id !== m.id && (x.cause === m.effect || x.effect === m.effect))) missing = true
+      }
+      return { memories: extra, missing }
+    } catch {
+      return { memories: [], missing: false }
+    }
+  }
+
+  // 主动说话濢�活（无常驻监视时：定时随机调记忆；有常驻时由评论机会触发�?
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      try {
+        const s = loadSettings(SETTINGS_PATH)
+        if (s.listening) return // 有常驻：由感知调度器（sense-scheduler）触�?
+        const pick = randomRecall(store, ['life', 'knowledge'])
+        if (!pick) return
+        writeFileSync(
+          join(DATA_DIR, 'activation.json'),
+          JSON.stringify({ ts: Date.now(), source: 'idle-recall', memory: pick }, null, 2),
+          'utf8',
+        )
+      } catch {}
+    }, 30 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, 'hcem.activation')
+
+  // 空闲调度�?0min 做梦 �?30min 休眠（全停模型）+ 用户活动打断
+  ctx.effect(() => {
+    let idle = null
+    try {
+      idle = createIdleScheduler({
+        logger,
+        dataDir: DATA_DIR,
+        store,
+        getPersona: () => {
+          try {
+            const p = loadPersona()
+            return p?.name || 'HCEM'
+          } catch {
+            return 'HCEM'
+          }
+        },
+        getMood: () => {
+          try {
+            const e = store?.getEmotion('global')
+            if (!e) return ''
+            return `H${Math.round(e.H)} S${Math.round(e.S)}`
+          } catch {
+            return ''
+          }
+        },
+        sleepAll: async () => {
+          for (const key of ['qwen3', 'omni', 'qwen25vl']) {
+            try {
+              stopService(key, logger)
+            } catch {}
+          }
+        },
+        checkIntervalMs: 30 * 1000,
+      })
+      idle.recoverPartials?.()
+      idle.start()
+    } catch (error) {
+      logger.warn?.('[hcem] idle 调度器初始化失败: ' + String((error && error.message) || error))
+    }
+    // 用户消息 �?打断�?+ 重置空闲
+    const origProcess = processUserMessage
+    processUserMessage = function (text, session) {
+      try {
+        idle?.touchUser?.()
+      } catch {}
+      return origProcess(text, session)
+    }
+    return () => {
+      try {
+        idle?.stop?.()
+      } catch {}
+      processUserMessage = origProcess
+    }
+  }, 'hcem.idle.scheduler')
+
+  // 感知状��的时间戳：注入时用来判断��这条感知是不是几分钟前的旧话����?
+  // 之前只存文本，旧描述会一轮轮重复塞进提示词，AI 会抱怨��一直是同一句����?
+  // 感知窗口：保留最近两分钟的��看到了 / 听到了��，供摘要管线取用��?
+  // 原来�?lastScreenDesc / lastAudioKind 只有「最近一次��，没有历史，收不出时间段��?
+  // ASR 热词：人名是朢�容易被识别错的一类（不认识的字必然错）��?
+  // 每分钟刷新一次，人物卡新�?改名都能跟上。热词是识别时的偏置，不是事后猜�?
+  ctx.effect(() => {
+    const refresh = () => {
+      try {
+        const names = listPeople()
+          .map((p) => p?.name)
+          .filter(Boolean)
+          .slice(0, 30)
+        const me = loadMe(DATA_DIR)
+        const meName = String(me?.text || '').match(/我是(.{1,12}?)[。，\n]/)?.[1]
+        setAsrTerms([...(meName ? [meName] : []), ...names])
+      } catch {}
+    }
+    refresh()
+    const timer = setInterval(refresh, 60000)
+    return () => clearInterval(timer)
+  }, 'hcem.asr.terms')
+
+  const perceptionWindow = createPerceptionWindow({ maxAgeMs: 120000, maxItems: 80 })
+  // 防重：同丢�条摘要不要因为连�?onComment 跑两�?
+  let lastSummaryAt = 0
+  const SUMMARY_MIN_GAP_MS = 60000
+
+  let lastScreenAt = 0
+  let lastAudioAt = 0
+  // 感知注入的时效上限（毫秒）：超过就不注入，避免复读旧画面
+  const PERCEPTION_STALE_MS = 120000
+
+  // 主动搭话的最小间隔：sense-scheduler 内部已有 COMMENT_COOLDOWN_MS(20s)�?
+  // 这里再兜丢�层，防止调度器抖动或多次 onComment 连发�?
+  let lastProactiveAt = 0
+  const PROACTIVE_MIN_GAP_MS = 20000
+
+  // 感知调度（截�?+ 监听合并）：搭话�?+ L 决定采样频率；环境变化大则加速，安静则减�?
+  //   朢�终档�?= 用户选的搭话�?+ L 修正（L>60 +1 档，L<40 -1 档）
+  //   安静档几乎不主动，只有��用户刚说话」或「情绪剧烈波动��才可能弢��?
+  ctx.effect(() => {
+    let sense = null
+    let manager = null
+    let lastUserAt = 0
+    let lastChange = { score: 0, description: '', at: 0, newScene: false }
+    let sceneKind = null
+
+    const origProcess2 = processUserMessage
+    processUserMessage = function (text, session) {
+      lastUserAt = Date.now()
+      return origProcess2(text, session)
+    }
+
+    let syncTimer = null
+    try {
+      if (!loadSettings(SETTINGS_PATH).listening) {
+        return () => {
+          processUserMessage = origProcess2
+        }
+      }
+
+      const cloudBoard = createCloudBoard({
+        dataDir: DATA_DIR,
+        cloud: loadSettings(SETTINGS_PATH).cloudVision || null,
+        logger,
+      })
+      manager = createCaptureManager({
+        dataDir: DATA_DIR,
+        modelsDir: MODELS_DIR,
+        intervalMs: 6000,
+        enableSmallVlm: true,
+        enableFunnel: true,
+        logger,
+        cloudBoard,
+        getEmotion: () => {
+          try {
+            return store?.getEmotion('global')
+          } catch {
+            return null
+          }
+        },
+        onChange: (ev) => {
+          lastChange = {
+            score: Number(ev?.diff ?? 0),
+            description: String(ev?.description || ''),
+            at: Date.now(),
+            newScene: false,
+          }
+          if (ev?.description) lastScreenAt = Date.now()
+          // 进窗口：供摘要管线按时间轴取�?
+          if (ev?.description) {
+            perceptionWindow.push({
+              kind: 'screen',
+              text: ev.description,
+              ts: Date.now(),
+              meta: { diff: ev.diff ?? 0, priority: ev.priority ?? 'mid', isVideo: ev.isVideo === true },
+            })
+          }
+          // 视觉结果先进融合器，等同丢�时间窗内的声音一起合并写记忆
+          if (ev?.description) {
+            fusion.pushVision({
+              ts: Date.now(),
+              text: ev.description,
+              meta: {
+                image: ev.priority === 'high' ? ev.image : null,
+                screen: ev.screen ?? 0,
+                diff: ev.diff ?? 0,
+                priority: ev.priority ?? 'mid',
+                modelScore: ev.modelScore ?? null,
+                isVideo: ev.isVideo === true,
+              },
+            })
+          }
+        },
+      })
+      manager.start()
+
+      sense = createSenseScheduler({
+        logger,
+        getL: () => {
+          try {
+            return store?.getEmotion('global')?.L ?? 55
+          } catch {
+            return 55
+          }
+        },
+        getTalk: () => {
+          try {
+            return loadSettings(SETTINGS_PATH).talkativeness ?? 1
+          } catch {
+            return 1
+          }
+        },
+        getRecentUserMessage: () => Date.now() - lastUserAt < 30000,
+        capture: () => {
+          if (lastChange.description) lastScreenDesc = lastChange.description
+          lastChangeScore = Number(lastChange.score || 0)
+          return {
+            ok: true,
+            changeScore: lastChange.score,
+            description: lastChange.description,
+            newScene: lastChange.newScene,
+          }
+        },
+        listen: async () => {
+          const r = await audioTick({ dataDir: DATA_DIR, seconds: 5 })
+          if (r.ok || r.soundDesc || r.kind) lastAudioAt = Date.now()
+          // 进窗口：转写 / 声音分类都留丢�条，供摘要按时间轴取�?
+          try {
+            const audioText = String(r.soundDesc || r.text || r.categoryName || '').trim()
+            if (audioText) {
+              perceptionWindow.push({ kind: 'audio', text: audioText, ts: Date.now(), meta: { audioKind: r.kind || r.category || 'scene' } })
+            }
+          } catch {}
+        // 声音分类结果（人�?音乐/警报/键鼠/碰撞…）直接更新感知状��?
+        if (r.soundDesc) {
+          lastAudioKind = r.categoryName || r.kind || '环境�?
+          // 音乐分析在感知层已经跑过时，�?BPM/调��并进��听到��的文本里，
+          // 这样提示词和感知窗口里都带着它��?
+          const mi = r.musicInfo
+          lastAudioText = mi && mi.ok && mi.text ? `${r.soundDesc}�?{mi.text}` : r.soundDesc
+        }
+          if (r.ok) {
+            if (store) {
+              const alpha = (() => {
+                try {
+                  return store.getEmotion('global')
+                } catch {
+                  return null
+                }
+              })() || { H: 360, S: 15 }
+              try {
+                // 声音先进融合器，等同丢�时间窗内的画面一起合�?
+                fusion.pushAudio({
+                  ts: Date.now(),
+                  text: r.soundDesc || r.text || r.categoryName || '环境�?,
+                  meta: { audioKind: r.category || r.kind || 'scene', wav: r.wav || null },
+                })
+              } catch {}
+            }
+            if (r.kind && r.kind !== sceneKind) sceneKind = r.kind
+          }
+          if (r.text) lastAudioText = String(r.text).slice(0, 120)
+          if (r.kind) lastAudioKind = String(r.kind)
+          return { ok: r.ok, text: r.text, kind: r.kind, emotion: r.emotion }
+        },
+        onComment: async ({ reason, maxChars, screenDesc, audioKind, tier }) => {
+          try {
+            // 留档：给 UI / 兜底注入�?
+            writeFileSync(
+              join(DATA_DIR, 'activation.json'),
+              JSON.stringify(
+                {
+                  ts: Date.now(),
+                  source: 'sense',
+                  reason,
+                  maxChars,
+                  tier,
+                  screenDesc: screenDesc || '',
+                  audioKind: audioKind || '',
+                },
+                null,
+                2,
+              ),
+              'utf8',
+            )
+            logger.debug?.('[hcem] sense comment triggered: ' + reason)
+
+            // 后台跑摘要管线（两步共约 9 秒，不能 await，否则会堵住感知调度�?
+            runSummaryPipeline({ reason, tier }).catch((e) => logDebug('summary pipeline: ' + String((e && e.message) || e)))
+          } catch (error) {
+            logDebug('sense comment failed: ' + String((error && error.message) || error))
+          }
+        },
+      })
+      sense.start()
+
+      /**
+       * 两步摘要管线（后台跑，不阻塞感知调度�?
+       *
+       * 材料：perceptionWindow 朢��?60 �?
+       * 第一步：1.7B 客观摘要「发生了仢�么��?
+       * 第二步：Omni �?me + HSL + 记忆 把摘要讲成一段话
+       * 产物：写�?activation.json，下丢�轮注入时 AI 会看�?
+       */
+      async function runSummaryPipeline({ reason, tier }) {
+        const now = Date.now()
+        if (now - lastSummaryAt < SUMMARY_MIN_GAP_MS) return
+        // 120 秒��不�?60：实�?60 秒窗口常常只捞到 2 条，材料太薄，摘要只有几十字
+        const items = perceptionWindow.recent(120000)
+        if (items.length < 3) {
+          logDebug(`summary skip: 材料太少(${items.length})`)
+          return
+        }
+        lastSummaryAt = now
+        const materials = items.map((i) => ({
+          source: i.kind === 'screen' ? '画面' : i.kind === 'audio' ? '声音' : '情绪',
+          text: i.text,
+          ts: i.ts,
+        }))
+        const gapMs = now - (lastUserAt || now)
+        const { system } = buildCompanionPrompt({ summary: '', gapMs })
+        const r = await summarizeTwoStep({
+          materials,
+          gapMs,
+          step1Model: 'qwen3',
+          step2Model: 'omni',
+          thinking1: false,
+          thinking2: false,
+          step2System: system,
+          // step2User 留空：two-step 会用 step1 自动拼��我刚刚看到了：…��?
+        })
+        if (!r.ok) {
+          logDebug('summary failed: ' + String(r.error || ''))
+          return
+        }
+        try {
+          writeFileSync(
+            join(DATA_DIR, 'activation.json'),
+            JSON.stringify(
+              {
+                ts: Date.now(),
+                source: 'summary',
+                reason,
+                tier,
+                step1: r.step1,
+                summary: r.step2,
+                chars: r.chars,
+              },
+              null,
+              2,
+            ),
+            'utf8',
+          )
+        } catch {}
+        logDebug(`summary ok: step1=${r.step1.length} step2=${r.chars} (${r.ms1}+${r.ms2}ms)`)
+
+        // 摘要好了 �?主动说一句（和语音那边的限流丢�致，20 秒内不重复）
+        try {
+          const live = ctx.agents?.list?.() ?? []
+          const target = live.find((a) => presetForAgent(a) === 'hcem')
+          if (target && Date.now() - lastProactiveAt >= PROACTIVE_MIN_GAP_MS) {
+            lastProactiveAt = Date.now()
+            const r2 = await sendToSession(String(target.id), r.step2, { source: { kind: 'system-prompt' } })
+            logDebug('summary proactive -> ' + JSON.stringify(r2))
+          } else if (!target) {
+            logDebug('summary proactive skipped: no live HCEM session')
+          }
+        } catch (e) {
+          logDebug('summary proactive failed: ' + String((e && e.message) || e))
+        }
+      }
+
+      // 调度器算出的间隔 �?同步给采集管理器（每 10 秒对齐一次）
+      syncTimer = setInterval(() => {
+        try {
+          const iv = sense?.status?.().lastIntervalMs
+          if (iv) manager?.setIntervalMs?.(iv)
+        } catch {}
+      }, 10000)
+    } catch (error) {
+      logger.warn?.('[hcem] sense 调度器初始化失败: ' + String((error && error.message) || error))
+    }
+
+    return () => {
+      if (syncTimer) clearInterval(syncTimer)
+      try {
+        sense?.stop?.()
+      } catch {}
+      try {
+        manager?.stop?.()
+      } catch {}
+      processUserMessage = origProcess2
+    }
+  }, 'hcem.sense.scheduler')
+
+  // 串行处理消息，避免异步更新乱�?
+  let updateChain = Promise.resolve()
+  function processUserMessage(text, session) {
+    updateChain = updateChain
+      .then(async () => {
+        // B2：上丢�轮回答已生成 �?判定哪些记忆真正被用到（命中的才 δ+1�?
+        try {
+          const laPath = join(DATA_DIR, 'last-answer.json')
+          if (store && recalledMemories.length > 0) {
+            const la = JSON.parse(readFileSync(laPath, 'utf8'))
+            if (la && la.text) {
+              const used = markMemoriesUsed(store, recalledMemories, la.text)
+              // 回答生成后计�?MD（压�?+ 调用 + 联想�?
+              for (const u of used) {
+                try {
+                  const base = recalledMemories.find((m) => m.id === u.id) || u
+                  const compressed = String(base.level || '') === 'summary' ? 0.5 : 0.15
+                  const recalled = Math.min(1, Number(base.access_count ?? base.accessCount ?? 1) / 5)
+                  const associative = /记不清|好像|大概|似乎|可能是|曾经/.test(String(la.text)) ? 0.5 : 0
+                  const md = computeMD({ compressed, recalled, associative })
+                  store.updateMemoryMD(u.id, md)
+                } catch {}
+              }
+            }
+          }
+          rmSync(laPath, { force: true })
+        } catch {}
+
+        // 只对 HCEM 模式会话生效：标�?创��会话不结算情绪、不写记�?
+        if (!isHcemSession(session)) return
+        if (!loadSettings(SETTINGS_PATH).enabled) {
+          if (store && !coldSince) {
+            coldSince = new Date().toISOString()
+            try {
+              store.setMeta('cold_since', coldSince)
+            } catch {}
+          }
+          return
+        }
+        if (coldSince) {
+          coldSince = null
+          try {
+            store.setMeta('cold_since', '')
+          } catch {}
+        }
+        const now = Date.now()
+        const lastAt = store ? Number(store.getMeta('last_settle_at') || 0) : 0
+        const elapsedMin = lastAt > 0 ? (now - lastAt) / 60000 : 0
+
+        // 长期样本 �?可变化的基线（六色圆均��）
+        const samples = store ? store.loadJSON('emotion-samples.json') || [] : []
+        const baselineInfo = computeBaseline(samples, { H: baseline.H, S: baseline.S, L: baseline.L })
+        if (elapsedMin > 0) {
+          state = settle(state, { elapsedMin, baselineH: baselineInfo.H, baselineL: baselineInfo.L })
+        }
+
+        // 文本刺激优先；文本没有明显情绪时，用「刚看到的画�?/ 听到的声音��做弱刺濢�
+        // 感知刺激强度上限 0.3，避免盖过真实对�?
+        const textStimulus = analyzer ? await analyzer.analyze(text) : analyzeText(text)
+        let stimulus = textStimulus
+        if (!stimulus) {
+          try {
+            const src = String(lastScreenDesc || '') || String(lastAudioKind || '')
+            const sensed = src ? analyzeText(src) : null
+            if (sensed) {
+              stimulus = {
+                targetHue: sensed.targetHue,
+                intensity: Math.min(0.3, 0.1 + Math.abs(Number(lastChangeScore || 0)) * 0.5),
+                emotion: sensed.emotion,
+                source: 'perception',
+              }
+              logDebug(`perception stimulus hue=${sensed.targetHue} intensity=${stimulus.intensity.toFixed(2)}`)
+            }
+          } catch {}
+        }
+        state = stimulus ? applyStimulus(state, stimulus, baseline.stimulusScale) : tick(state)
+        if (store) {
+          store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+          store.setMeta('last_settle_at', String(now))
+          // 记忆转区：上下文 �?缓冲池三�?�?遗忘（关�?HCEM 时不执行�?
+          try {
+            promoteMemories(store, now)
+          } catch {}
+
+          // 记录样本�? 天窗口），并�?AI �?natural 基线慢慢跟随长期情绪重心
+          const nextSamples = appendSample(samples, state, now)
+          store.saveJSON('emotion-samples.json', nextSamples)
+          if (baselineInfo.count > 0) {
+            const cur = loadSettings(SETTINGS_PATH)
+            if (Number(cur.natural?.hue ?? 0) !== baselineInfo.natural) {
+              saveSettings(SETTINGS_PATH, {
+                ...cur,
+                natural: { ...cur.natural, hue: baselineInfo.natural },
+              })
+            }
+          }
+        }
+
+        // L（明�?自信）：方案 A（平滑靠拢记忆基线）+ 方案 C（六�?SC 耦合�? 时钟回落
+        if (store) {
+          const mems = store.listMemories({ limit: 50 })
+          const baseL = lightnessFromMemories(mems)
+          // �?向记忆基线轻拉（每轮 1%，弱拉回：允许情绪把 L 推到极限�?
+          let nextL = state.L + (baseL - state.L) * 0.01
+          // �?SC 耦合：情绪越强��SC 越显著（每轮 ±0.3×S/100，可累积到极限）
+          const sc = selfConfidenceOf(state.H)
+          const lDeviation = Math.abs(nextL - 55) / 45
+          const lGain = L_BASE * Math.exp(L_EXPONENT * Math.min(1, lDeviation))
+          nextL += sc * 0.3 * (Number(state.S) / 100) * lGain
+          // �?时钟回落：每�?0.5% 向基线（真正的回落交�?settle 按真实时间做�?
+          nextL += (baseL - nextL) * 0.005
+          state = { ...state, L: Math.max(0, Math.min(100, nextL)) }
+          store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+        }
+
+        // 安全阢�：用更新后的情绪 + 本轮文本评估
+        recordTurn(safetyWin, { H: state.H, text })
+        assertSafetyValve('情绪结算�?)
+        safetyState = evaluateSafety(safetyWin, state)
+        if (safetyState.level > 0) {
+          logDebug(
+            `safety level=${safetyState.level} count=${safetyState.count} triggered=${safetyState.triggered.join(',')} details=${JSON.stringify(safetyState.details)}`,
+          )
+        }
+
+        // 记忆写入（�?编码时情绪，β=内容情绪�?
+        // 3 级：先冷却到安全�?75~80（保留同理心，不冷却到基准）
+        // �?3 分钟后仍未自然回落（S �?�?5），允许自制器介�?
+        if (safetyState.level >= 3) {
+          if (!level3Since) level3Since = now
+          const capped = Math.min(80, Math.max(75, state.S))
+          if (Math.abs(capped - state.S) > 1e-9) {
+            state = { ...state, S: capped }
+            if (store) store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+          }
+          if (now - level3Since >= 3 * 60 * 1000 && state.S >= 75) {
+            const sc = useSelfControl(state, baseline)
+            if (sc.applied) {
+              state = sc.state
+              if (store) store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+              logDebug(`self-control(level3) delta=${sc.delta.toFixed(1)} S=${state.S.toFixed(0)} cooldown=${sc.cooldownTurns}`)
+            }
+          }
+        } else {
+          level3Since = 0
+          // 情绪自制器：S>75 且不在冷却时自主回调
+          const sc = useSelfControl(state, baseline)
+          if (sc.applied) {
+            state = sc.state
+            if (store) store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+            logDebug(`self-control delta=${sc.delta.toFixed(1)} S=${state.S.toFixed(0)} cooldown=${sc.cooldownTurns}`)
+          }
+        }
+
+        if (store && analyzer && shouldRemember(text) && safetyState.level < 2 && !safetyState.protected) {
+          try {
+            const memText = extractMemoryText(text)
+            // 兜底�? 秒内同一段文本只写一条（双实�?事件重放时防止重复落库）
+            const duplicated = store
+              .listMemories({ limit: 6 })
+              .some((m) => m.text === memText && Date.now() - new Date(m.created_at).getTime() < 5000)
+            if (!duplicated) {
+              assertSafetyValve('记忆写入�?)
+              const [vec] = await analyzer.embed([memText])
+              // trauma 戳：用户辱骂/羞辱 �?这条记忆带痛�?
+              const insult = detectInsult(text)
+              store.putMemory({
+                text: memText,
+                summary: summarize(memText),
+                embedding: vec,
+                alphaH: state.H,
+                alphaS: state.S,
+                betaH: stimulus ? stimulus.targetHue : null,
+                gammaValue: computeGamma(
+                  { H: state.H, S: state.S },
+                  stimulus ? { H: stimulus.targetHue, S: (stimulus.intensity ?? 0.5) * 100 } : null,
+                ),
+                zone: 'context',
+                pinned: detectPinIntent(memText),
+                L: 1.0,
+                level: 'full',
+                ...(insult.hit ? { trauma: insult.severity, traumaSource: 'insult' } : {}),
+              })
+            }
+          } catch (error) {
+            logger.debug(`[hcem] memory write failed: ${String((error && error.message) || error)}`)
+          }
+        }
+
+        // 棢�索相关记忆（供注�?system prompt�?
+        if (store && analyzer) {
+          try {
+            const [qvec] = await analyzer.embed([text])
+            recalledMemories = recall(store, qvec, 3, 0.45)
+            // B3：因果链扩展（沿 cause/effect �?1 跳；缺环 �?低自信度�?
+            let chainMissing = false
+            try {
+              const chain = expandCausalChain(recalledMemories)
+              if (chain.memories.length > 0) recalledMemories = recalledMemories.concat(chain.memories)
+              chainMissing = chain.missing
+            } catch {}
+        if (recalledMemories.length > 0) {
+          // 回忆反哺：记忆的 γ 把当时的情绪唤起�?
+          state = applyRecallToEmotion(state, recalledMemories)
+          // 链条缺环：情绪不自信（L 略降，语气会更谨慎）
+          if (chainMissing) state = { ...state, L: Math.max(0, Number(state.L) - 5) }
+          store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+        }
+          } catch (error) {
+            logger.debug(`[hcem] recall failed: ${String((error && error.message) || error)}`)
+          }
+        }
+
+        // 清晰度衰减（箢�化：每轮棢�查）
+        if (store) {
+          try {
+            decayMemories(store)
+          } catch (error) {
+            logger.debug(`[hcem] decay failed: ${String((error && error.message) || error)}`)
+          }
+        }
+
+        logger.debug(
+          `[hcem] emotion ${stimulus ? `targetHue=${stimulus.targetHue}` : 'decay'}: H=${state.H.toFixed(0)} S=${state.S.toFixed(0)} L=${state.L.toFixed(0)} memory=${recalledMemories.length}`,
+        )
+      })
+      .catch((error) => {
+        logger.debug(`[hcem] process message failed: ${String((error && error.message) || error)}`)
+      })
+  }
+
+  // 3) 监听会话事件：用户消�?�?情绪刺激；assistant/message �?缓存文本；turn/end �?TTS 播报
+  let pendingSpeakText = ''
+  // 感知状��（供提示词使用）：朢�近一次画面描�?/ 声音场景
+  let lastScreenDesc = ''
+  let lastAudioKind = ''
+  let lastAudioText = ''
+  let lastChangeScore = 0
+  logDebug(`plugin loaded; analyzer=${analyzer ? 'pending' : 'null'}; store=${store ? 'ready' : 'null'}`)
+  ctx.on('session/event', (session, event) => {
+    try {
+      logDebug(`event ${event.type}`)
+      // 空白会话切换 preset 后重新判定工具可见��：切到 HCEM 要撤锢�掩码�?
+      // 切离 HCEM 要重新加上��?
+      if (event.type === 'agent-preset/selected') {
+        syncToolMask(ctx.agents.get(session.id))
+        return
+      }
+      // 语音输出（TTS）：缓存本轮回复，回合结束时播报
+      if (event.type === 'assistant/message') {
+        try {
+          const txt = extractText(event.data?.message?.content)
+          if (txt) pendingSpeakText = txt
+        } catch {}
+        return
+      }
+      if (event.type === 'turn/end') {
+        const text = pendingSpeakText
+        pendingSpeakText = ''
+        try {
+          const s = loadSettings(SETTINGS_PATH)
+          if (!text || !s.enabled || !s.ttsEnabled || !isHcemSession(session)) return
+          const e = (store && store.getEmotion('global')) || state || { H: 360, S: 15, L: 55 }
+          // 流式播报：按句合成，第一句出来就播（不再等整段合成完�?
+          // 通话模式下把「正在说」告诉��话循环：用户开口时它要立刻停播放��?
+          try {
+            voiceCall?.setSpeaking(true)
+          } catch {}
+          speakStream({ text, H: e.H, S: e.S, L: e.L, dataDir: DATA_DIR, play: true, concurrency: 2 })
+            .then((r) => logDebug('tts stream ' + JSON.stringify(r)))
+            .catch((err) => logDebug('tts stream error ' + String((err && err.message) || err)))
+            .finally(() => {
+              try {
+                voiceCall?.setSpeaking(false)
+              } catch {}
+            })
+        } catch (error) {
+          logDebug('tts dispatch failed: ' + String((error && error.message) || error))
+        }
+        return
+      }
+      if (event.type === 'user/message') {
+        const data = event.data
+        const sourceKind = data?.source?.kind
+        if (sourceKind !== 'user') return // 只处理用户真实输入，忽略 runtime-context / inject
+        logDebug(`user/message data=${JSON.stringify(data).slice(0, 800)}`)
+        const text = extractText(data?.content ?? data?.message?.content)
+        if (!text) return
+        logDebug(
+          `extracted len=${text.length} shouldRemember=${shouldRemember(text)} analyzer=${analyzer ? 'ready' : 'null'}`,
+        )
+        // 双实�?重复投��：同一条消息只让先到的实例结算
+        if (!claimUserMessage(session, data, text)) {
+          logDebug(`skip duplicate user/message id=${data?.id ?? '(no id)'}`)
+          return
+        }
+        processUserMessage(text, session)
+      }
+    } catch (error) {
+      logDebug(`event error: ${String((error && error.message) || error)}`)
+      logger.debug(`[hcem] session event failed: ${String((error && error.message) || error)}`)
+    }
+  })
+
+  // 4) 角色�?/ 用户卡写入工具（AI 自主维护人设与用户信息）
+  // 工具统一�?registerTool 注册：schema 可能对所有会话可见（preset 插件仍注册到
+  // 全局 registry），�?execute 会在�?HCEM 会话里直接拒绝，避免被标准会话调用��?
+  // videoPath 安全校验：只允许用户目录/项目�?明确视频扩展名；拒绝系统敏感目录
+  function safeVideoPath(input) {
+    const raw = String(input ?? '').trim()
+    if (!raw) return { ok: false, error: 'empty-path' }
+    if (!/\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v|ts)$/i.test(raw)) return { ok: false, error: 'unsupported-ext' }
+    const lower = raw.toLowerCase().replace(/\\\\/g, '/')
+    const deniedRoots = ['c:/windows', 'c:/program files', 'c:/programdata', 'c:/$recycle']
+    if (deniedRoots.some((d) => lower.startsWith(d))) return { ok: false, error: 'denied-path' }
+    const allowedRoots = ['c:/users/', 'e:/hcem/', 'd:/hcem/']
+    if (!allowedRoots.some((r) => lower.startsWith(r))) return { ok: false, error: 'outside-allowed' }
+    return { ok: true, path: raw }
+  }
+
+  const registerTool = (definition) => {
+    const run = definition.execute
+    definition.execute = async (args, exec) => {
+      if (!isHcemSession(exec?.agent?.session)) {
+        throw new Error('HCEM 工具只能�?HCEM 模式会话中使�?)
+      }
+      return run(args, exec)
+    }
+    return ctx.tools.register(definition)
+  }
+
+  // 合并后的 9 个工具只负责分发，真正干活的是这里收集的原始实现�?
+  // defineTool 只登记不注册（不产生 schema、不�?token），由新工具�?action 调它�?
+  const impls = {}
+  const defineTool = (definition) => {
+    impls[definition.name] = definition
+    return definition
+  }
+
+  // 把原工具的返回��压成统丢��?{ ok, summary }，让 9 个新工具共用丢��?output schema
+  function toSummary(r, fallback = 'ok') {
+    if (r == null) return { ok: true, summary: fallback }
+    if (typeof r !== 'object') return { ok: true, summary: String(r) }
+    if (r.ok === false) return { ok: false, summary: String(r.error || 'failed') }
+    const parts = []
+    if (Array.isArray(r.entries)) {
+      parts.push(
+        r.entries.length === 0
+          ? '（空�?
+          : r.entries
+              .map((e) => `- ${e.title || e.name || '?'}${e.chars ? `�?{e.chars} 字）` : ''}${e.summary ? `�?{e.summary}` : ''}`)
+              .join('\n'),
+      )
+    }
+    if (r.text) parts.push(String(r.text).slice(0, 3000))
+    if (r.length) parts.push(`${r.length} 字`)
+    if (r.warning) parts.push('�?' + r.warning)
+    return { ok: true, summary: parts.filter(Boolean).join('\n') || fallback }
+  }
+
+  // 9 个合并工具共用的输出 schema：只回一句人�?
+  const SUMMARY_OUTPUT = {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        ok: { type: 'boolean' },
+        summary: { type: 'string' },
+      },
+      required: ['ok', 'summary'],
+    },
+    render: (_args, value) => [{ type: 'text', text: String(value.summary || (value.ok ? 'ok' : 'failed')) }],
+  }
+
+  // ┢�┢� 工具可见性：只让 HCEM 会话看到 hcem_* ┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
+  // preset 插件仍然把工具注册进全局 registry，所以��可见����只能靠 agent scope �?
+  // restrict 掩码：每个非 HCEM �?agent �?deny，切�?HCEM 时再撤销�?
+  // 掩码�?per-agent 的，不会影响别的会话�?
+  const maskedAgents = new Map()
+
+  function presetForAgent(agent) {
+    const fromProjection = presetOf(agent?.session)
+    if (fromProjection !== undefined) return fromProjection
+    return agent?.session?.header?.agentPreset
+  }
+
+  function readMods() {
+    try {
+      return JSON.parse(fs.readFileSync('E:/HCEM/HCEM v0.0.3.1/data/ui/mods.json', 'utf8'))
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 弢�关关睢��?�?这些工具�?HCEM 会话也不可见（模型连说明都拿不到）��?
+   * 合并后按「能力����不是��单个工具��判�?
+   *   - 工作笔记 hcem_work：默认关，要用再弢�
+   *   - 视听 hcem_vision：desktop �?video 任一弢�启就可用
+   *   - �?hcem_listen：跟 audio 弢��?
+   *   - �?hcem_voice：跟 voiceOut 弢��?
+   *   - 人格/笔记(journal,people)/记忆/状��：常驻
+   */
+  function disabledTools(mods) {
+    const on = (k) => mods?.[k]?.enabled === true
+    const off = []
+    if (!on('work')) off.push('hcem_work')
+    if (!(on('desktop') || on('video'))) off.push('hcem_vision')
+    if (!on('audio')) off.push('hcem_listen')
+    if (!on('voiceOut')) off.push('hcem_voice')
+    return off.filter((n) => HCEM_TOOL_NAMES.includes(n))
+  }
+
+  function syncToolMask(agent) {
+    if (!agent || !agent.id) return
+    const key = String(agent.id)
+    const preset = presetForAgent(agent)
+    // preset 还没确定：先别动，等 agent-preset/selected 再判�?
+    if (preset === undefined) return
+
+    // 先撤掉上丢�次的掩码：restrict 是叠加的，重复施加会累积
+    const existing = maskedAgents.get(key)
+    if (existing) {
+      try {
+        existing()
+      } catch {}
+      maskedAgents.delete(key)
+    }
+
+    const isHcem = preset === 'hcem'
+    // �?HCEM 会话：所�?hcem_* 丢�律不可见
+    // HCEM 会话：只遮��开关关睢�」的那几�?
+    const deny = isHcem ? disabledTools(readMods()) : HCEM_TOOL_NAMES
+    if (deny.length === 0) {
+      if (isHcem) logDebug(`hcem tools all visible for agent ${key} (all mods on)`)
+      return
+    }
+    try {
+      const dispose = agent.ctx?.tools?.restrict?.({ deny })
+      if (typeof dispose === 'function') {
+        maskedAgents.set(key, dispose)
+        logDebug(`${isHcem ? 'mod-off' : 'non-hcem'} mask for agent ${key}: deny ${deny.length} (${deny.join(',')})`)
+      }
+    } catch (error) {
+      logDebug(`mask failed for agent ${key}: ${String((error && error.message) || error)}`)
+    }
+  }
+
+  ctx.on('agent/created', ({ agent } = {}) => syncToolMask(agent))
+
+  // 弢�关变化（UI �?mods.json）→ 重新评估扢��?agent 的工具可见����?
+  // 轮询 4 秒一次，�?fs.watch 稳（Windows 上重命名/替换写入经常不触发）�?
+  let modsSig = ''
+  try {
+    modsSig = JSON.stringify(readMods())
+  } catch {}
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      let sig = ''
+      try {
+        sig = JSON.stringify(readMods())
+      } catch {}
+      if (sig === modsSig) return
+      modsSig = sig
+      logDebug('mods.json changed, re-evaluating tool visibility')
+      try {
+        for (const agent of ctx.agents?.list?.() ?? []) syncToolMask(agent)
+      } catch (error) {
+        logDebug(`mods re-eval failed: ${String((error && error.message) || error)}`)
+      }
+    }, 4000)
+    return () => clearInterval(timer)
+  }, 'hcem.mods.watch')
+
+  // 插件加载前就已经存在�?agent（重启后继续的会话）也要补一次判定��?
+  try {
+    const live = ctx.agents?.list?.() ?? []
+    for (const agent of live) syncToolMask(agent)
+    logDebug(
+      `agents at load: ${live.map((a) => `${String(a.id).slice(0, 8)}:${String(presetForAgent(a))}`).join(', ') || '(none)'}`,
+    )
+  } catch (error) {
+    logDebug(`initial mask sweep failed: ${String((error && error.message) || error)}`)
+  }
+
+  defineTool({
+    name: 'hcem_persona_write',
+    description: '写入或更�?HCEM 角色卡（persona.md，你自己的设定）。mode=replace 整段替换，mode=append 追加到末尾；写完立即生效�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', description: '角色卡内容（Markdown�? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '默认 replace（整段替换）' },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          mode: { type: 'string', enum: ['replace', 'append'] },
+          path: { type: 'string' },
+          length: { type: 'number' },
+          warning: { type: 'string' },
+        },
+        required: ['ok', 'mode', 'path', 'length'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `已写入角色卡�?{value.mode}�?{value.length} 字）${value.warning ? `�?{value.warning}` : ''}`,
+        },
+      ],
+    },
+    execute: async ({ text, mode = 'replace' }) => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const path = mode === 'append' ? appendPersona(text) : savePersona(text)
+      const length = (loadPersona() ?? '').length
+      return {
+        ok: true,
+        mode,
+        path,
+        length,
+        ...(length > PERSONA_MAX_CHARS
+          ? { warning: `角色�?${length} 字，超出注入上限 ${PERSONA_MAX_CHARS}；超出部分不会被注入，建议用 hcem_persona_edit 删减` }
+          : {}),
+      }
+    },
+  })
+  defineTool({
+    name: 'hcem_user_card_write',
+    description: '写入或更�?HCEM 用户卡（用户.md，你记得的用户信息）。mode=replace 整段替换，mode=append 追加到末尾；写完立即生效�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', description: '用户卡内容（Markdown�? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '默认 replace（整段替换）' },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          mode: { type: 'string', enum: ['replace', 'append'] },
+          path: { type: 'string' },
+          length: { type: 'number' },
+          warning: { type: 'string' },
+        },
+        required: ['ok', 'mode', 'path', 'length'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `已写入用户卡�?{value.mode}�?{value.length} 字）${value.warning ? `�?{value.warning}` : ''}`,
+        },
+      ],
+    },
+    execute: async ({ text, mode = 'replace' }) => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const path = mode === 'append' ? appendUserCard(text) : saveUserCard(text)
+      const length = (loadUserCard() ?? '').length
+      return {
+        ok: true,
+        mode,
+        path,
+        length,
+        ...(length > USER_CARD_MAX_CHARS
+          ? { warning: `用户�?${length} 字，超出注入上限 ${USER_CARD_MAX_CHARS}；超出部分不会被注入，建议用 hcem_persona_edit 删减` }
+          : {}),
+      }
+    },
+  })
+
+  // 4c) 屢�部编�?删除：避免整卡重写，也避免卡片无限膨胢�
+  defineTool({
+    name: 'hcem_persona_edit',
+    description:
+      '屢�部修改或删除 HCEM 角色�?用户卡中的一段文字（不必整段重写）��find 必须唯一匹配；replace 不填表示删除该片段��改完立即生效��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        find: { type: 'string', description: '要替换或删除的原文片段（必须唯一匹配�? },
+        replace: { type: 'string', description: '替换后的文字；不填表示删除该片段' },
+        target: { type: 'string', enum: ['persona', 'user'], description: '默认 persona（角色卡）；user 表示用户�? },
+      },
+      required: ['find'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          target: { type: 'string', enum: ['persona', 'user'] },
+          removed: { type: 'boolean' },
+          length: { type: 'number' },
+          error: { type: 'string' },
+          count: { type: 'number' },
+        },
+        required: ['ok', 'target'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: value.ok
+            ? `�?{value.removed ? '删除' : '替换'}�?{value.target === 'user' ? '用户�? : '角色�?}，现 ${value.length} 字）`
+            : `未修改：${value.error}${value.count ? `（匹配到 ${value.count} 处，请写得更精确）` : ''}`,
+        },
+      ],
+    },
+    execute: async ({ find, replace, target = 'persona' }) => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const result = target === 'user' ? editUserCard(find, replace) : editPersona(find, replace)
+      return { target, ...result }
+    },
+  })
+
+  // 4c2) me：AI 自己的��我是谁」摘要（第一人称；改�?KV 缓存重载�?
+  defineTool({
+    name: 'hcem_me_edit',
+    description:
+      '修改「me」����你自己的第丢�人称身份摘要（放在系统提示最前）。当你发�?me �?persona 不一致时，用这个对齐；用户反复纠�?me 时，再��虑�?persona（用户权重更高）。me 要精箢��?00 字内），固定后不要频繁改（改动会�?KV 缓存重载）��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', description: '新的 me 全文（第丢�人称�?00 字内�? },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          length: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `me 已更新（${value.length} 字）；下次会话生效（KV 缓存会重载）` }]
+          : [{ type: 'text', text: `更新失败�?{value.error}` }],
+    },
+    execute: async ({ text }) => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const t = String(text || '').trim()
+      if (!t) return { ok: false, error: 'empty' }
+      if (t.length > 600) return { ok: false, error: 'me 太长（≤600 字）' }
+      const hash = personaHash(loadPersona())
+      const r = saveMe(DATA_DIR, { text: t, hash })
+      return r.ok ? { ok: true, length: t.length } : { ok: false, error: r.error }
+    },
+  })
+
+  // 4d) 日记本（阶段 4 遗留）：文件夹形态，不注入提示词，按霢��?
+  defineTool({
+    name: 'hcem_journal_list',
+    description:
+      '列出 HCEM 日记本里的所有文档（标题、摘要��字数��更新时间）。日记是鲸鲸自己的私人东西，不进入提示词，需要时再读；用户来翻看时可以提�?ta：日记是私人的，偷看不太礼貌�?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+                title: { type: 'string' },
+                summary: { type: 'string' },
+                chars: { type: 'number' },
+                updatedAt: { type: 'string' },
+              },
+              required: ['name', 'title', 'chars'],
+            },
+          },
+        },
+        required: ['ok', 'entries'],
+      },
+      render: (_args, value) =>
+        value.entries.length === 0
+          ? [{ type: 'text', text: '日记本还是空的��? }]
+          : [
+              {
+                type: 'text',
+                text: value.entries
+                  .map((e) => `- ${e.title}�?{e.name}�?{e.chars} 字）�?{e.summary}`)
+                  .join('\n'),
+              },
+            ],
+    },
+    execute: gateTool(async () => ({ ok: true, entries: listJournal() })),
+  })
+
+  defineTool({
+    name: 'hcem_journal_read',
+    description:
+      '读取 HCEM 日记本里的一篇文档全文��日记是鲸鲸自己的私人东西，不是作品集��也不是给用户看的说明；自己想读再读，用户来翻看时可以先提一句��别偷看我的日记」再动手�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', description: '日志名（不带 .md�? } },
+      required: ['name'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          text: { type: 'string' },
+          chars: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `# ${value.name}�?{value.chars} 字）\n\n${value.text}` }]
+          : [{ type: 'text', text: `读取失败�?{value.error}` }],
+    },
+    execute: gateTool(async ({ name }) => readJournal(name)),
+  })
+
+  defineTool({
+    name: 'hcem_journal_write',
+    description:
+      '写入或追�?HCEM 日记（Markdown）��日记属于鲸鲸自己：想写才写，记心情、生活��冒出来的念头，用��过日子」的口气而不是验收清单，不为演示或应付��写。mode=replace 覆盖整篇，mode=append 追加；单篇软上限 8000 字，超了建议另起丢�篇��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '日志名（不带 .md），�?2026-10-28 �?关于用户' },
+        text: { type: 'string', description: '日志内容（Markdown�? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '默认 replace' },
+      },
+      required: ['name', 'text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          chars: { type: 'number' },
+          warning: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [
+              {
+                type: 'text',
+                text: `已写入日志��?{value.name}」（${value.chars} 字）${value.warning ? `�?{value.warning}` : ''}`,
+              },
+            ]
+          : [{ type: 'text', text: `写入失败�?{value.error}` }],
+    },
+    execute: gateTool(async ({ name, text, mode = 'replace' }) => writeJournal(name, text, mode)),
+  })
+
+  // 4e) 人物关系网（生活常识区细分小区）：一人一卡，按需�?
+  defineTool({
+    name: 'hcem_people_list',
+    description:
+      '列出人物关系网里的人（称呼��关系��是否紧�?信任联系人��摘要）。联系方式只在本机，不要主动外泄�?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+                title: { type: 'string' },
+                relation: { type: 'string' },
+                contact: { type: 'string' },
+                emergency: { type: 'boolean' },
+                trusted: { type: 'boolean' },
+                summary: { type: 'string' },
+                chars: { type: 'number' },
+              },
+              required: ['name', 'title', 'chars'],
+            },
+          },
+        },
+        required: ['ok', 'entries'],
+      },
+      render: (_args, value) =>
+        value.entries.length === 0
+          ? [{ type: 'text', text: '人物关系网还是空的��? }]
+          : [
+              {
+                type: 'text',
+                text: value.entries
+                  .map(
+                    (e) =>
+                      `- ${e.title}�?{e.name}�?{e.relation ? `�?{e.relation}` : ''}${e.emergency ? '｜紧急联系人' : ''}${e.trusted ? '｜信任联系人' : ''}�?{e.summary}`,
+                  )
+                  .join('\n'),
+              },
+            ],
+    },
+    execute: gateTool(async () => ({ ok: true, entries: listPeople() })),
+  })
+
+  defineTool({
+    name: 'hcem_people_read',
+    description: '读取人物关系网里某个人的完整卡片�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', description: '人物称呼（不�?.md�? } },
+      required: ['name'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          text: { type: 'string' },
+          chars: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `# ${value.name}�?{value.chars} 字）\n\n${value.text}` }]
+          : [{ type: 'text', text: `读取失败�?{value.error}` }],
+    },
+    execute: gateTool(async ({ name }) => readPerson(name)),
+  })
+
+  defineTool({
+    name: 'hcem_people_write',
+    description:
+      '写入或追加人物卡（Markdown，建议含�? 关系：����? 联系方式：����? 紧��联系人：是/否����? 信任联系人：�?否��四个字段）。mode=replace 覆盖，mode=append 追加�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '人物称呼，如 妈妈 / 小王' },
+        text: { type: 'string', description: '人物卡内容（Markdown�? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '默认 replace' },
+      },
+      required: ['name', 'text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          chars: { type: 'number' },
+          warning: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `已写入人物卡�?{value.name}」（${value.chars} 字）${value.warning ? `�?{value.warning}` : ''}` }]
+          : [{ type: 'text', text: `写入失败�?{value.error}` }],
+    },
+    execute: gateTool(async ({ name, text, mode = 'replace' }) => writePerson(name, text, mode)),
+  })
+
+  // 4a) 记忆 pin 工具（AI 配额：缓冲池 2 次��生�?知识�?2 次，分开计）
+  let aiPinQuotaPool = 2
+  let aiPinQuotaLong = 2
+  defineTool({
+    name: 'hcem_memory_pin',
+    description:
+      '调整记忆重要度（pinned）：direction=up �?0.5，down �?0.5（pinned 范围 0~2，缓冲池 0~1）��? +
+      '缓冲池配�?2 次��生�?知识区配�?2 次（分开计，不能跨区使用）��? +
+      '用户明确要求记住或你确信重要�?up；你判断某条已不重要/过时时可�?down（可抵消用户或自己的判断）��? +
+      '任务类工作请�?hcem_work(action=write)，不要重�?pin�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: '记忆 id' },
+        direction: { type: 'string', enum: ['up', 'down'], description: 'up=�?0.5，down=�?0.5；默�?up' },
+      },
+      required: ['id'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          id: { type: 'string' },
+          pinned: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `已调整��?{value.id}」pinned=${value.pinned}（缓冲池剩余 ${aiPinQuotaPool} �?/ 生活知识区剩�?${aiPinQuotaLong} 次）` }]
+          : [{ type: 'text', text: `pin 失败�?{value.error}` }],
+    },
+    execute: async ({ id, direction = 'up' }) => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const m = store ? store.getMemory(id) : null
+      if (!m) return { ok: false, id, error: 'not-found' }
+      const isPool = ['context', 'pool_fast', 'pool_observe', 'pool_keep'].includes(m.zone)
+      const isLong = ['life', 'knowledge'].includes(m.zone)
+      if (!isPool && !isLong) return { ok: false, id, error: '只能对缓冲池或生�?知识区的记忆调整 pinned' }
+      const quota = isPool ? aiPinQuotaPool : aiPinQuotaLong
+      if (quota <= 0) {
+        return { ok: false, id, error: isPool ? '缓冲池的 AI pin 配额已用完（2 次）' : '生活/知识区的 AI pin 配额已用完（2 次）' }
+      }
+      if (isPool) aiPinQuotaPool -= 1
+      else aiPinQuotaLong -= 1
+      const amount = direction === 'down' ? -0.5 : 0.5
+      const pinned = store.addPin(id, amount)
+      return { ok: true, id, pinned: Number(pinned ?? 0) }
+    },
+  })
+
+  // 4b) 工作记忆工具（冷存子分区，文件组�?
+  defineTool({
+    name: 'hcem_work_write',
+    description:
+      '把用户交代的工作记入工作记忆（文件组，不压缩）��记录后请回复��我这就把这些事记入我的工作笔记里����mode=append 追加，replace 覆盖�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '工作笔记名，�?论文写作 / 网站弢��? },
+        text: { type: 'string', description: '工作内容（Markdown�? },
+        mode: { type: 'string', enum: ['append', 'replace'], description: '默认 append' },
+      },
+      required: ['name', 'text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          chars: { type: 'number' },
+          usage: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              chars: { type: 'number' },
+              max: { type: 'number' },
+              ratio: { type: 'number' },
+            },
+            required: ['chars', 'max', 'ratio'],
+          },
+          warning: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [
+              {
+                type: 'text',
+                text: `已记入工作笔记��?{value.name}」（${value.chars} 字，总占�?${Math.round((value.usage?.ratio ?? 0) * 100)}%�?{value.warning ? `�?{value.warning}` : ''}`,
+              },
+            ]
+          : [{ type: 'text', text: `写入失败�?{value.error}` }],
+    },
+    execute: gateTool(async ({ name, text, mode = 'append' }) => writeWork(name, text, mode)),
+  })
+
+  defineTool({
+    name: 'hcem_work_list',
+    description: '列出扢�有工作笔记（文件名��字数��更新时间）�?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+                chars: { type: 'number' },
+                updatedAt: { type: 'string' },
+              },
+              required: ['name', 'chars', 'updatedAt'],
+            },
+          },
+        },
+        required: ['ok', 'entries'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text:
+            value.entries.length === 0
+              ? '还没有工作笔记��?
+              : value.entries.map((e) => `- ${e.name}�?{e.chars} 字，${e.updatedAt.slice(0, 10)}）`).join('\n'),
+        },
+      ],
+    },
+    execute: gateTool(async () => ({ ok: true, entries: listWork() })),
+  })
+
+  defineTool({
+    name: 'hcem_work_read',
+    description: '读取某个工作笔记的完整内容��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', description: '工作笔记�? } },
+      required: ['name'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          text: { type: 'string' },
+          chars: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `工作笔记�?{value.name}」：\n${value.text}` }]
+          : [{ type: 'text', text: `读取失败�?{value.error}` }],
+    },
+    execute: gateTool(async ({ name }) => readWork(name)),
+  })
+
+  // 4c) 视觉工具（桌面监�?+ 看屏幕）
+  defineTool({
+    name: 'hcem_screen_look',
+    description: '看当前屏幕：截图并让视觉模型（Qwen2-VL）描述画面内容��用户说「看看我的屏�?看下这个」时调用�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        prompt: { type: 'string', description: '想看仢�么（可��，默认描述画面�? },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          text: { type: 'string' },
+          image: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok', 'text'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: value.text || '（画面描述为空）' }]
+          : [{ type: 'text', text: '看屏幕失败：' + (value.error || '未知错误') }],
+    },
+    execute: async ({ prompt }) => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const r = await describeScreen({ maxWidth: 1280, prompt })
+      return { ok: !r.error, text: r.text || '', image: r.image || '', error: r.error }
+    },
+  })
+
+  // 徢�指定 HCEM 会话发一条消息（悬浮球输入框走这里）
+  defineTool({
+    name: 'hcem_send_to_session',
+    description:
+      '把一条用户消息��进指定�?HCEM 会话（用于悬浮球输入框）。sessionId 不传就用当前会话�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        sessionId: { type: 'string', description: '目标会话 id（不�?当前会话�? },
+        text: { type: 'string', description: '要发送的文本' },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          via: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, v) =>
+        v.ok ? [{ type: 'text', text: '已发送（' + (v.via || '?') + '�? }] : [{ type: 'text', text: '发��失败：' + (v.error || '') }],
+    },
+    execute: gateTool(async ({ sessionId, text }) => {
+      const target = sessionId || currentAgent()?.session?.id
+      if (!target) return { ok: false, error: '没有目标会话' }
+      return await sendToSession(target, String(text))
+    }),
+  })
+
+  // 视听记忆抢救：到期前�?AI 决定救不救（也可查用户在看视频时的评价）
+  defineTool({
+    name: 'hcem_memory_rescue',
+    description:'视听记忆抢救与用户评价��action=list 列出快到期且价��不够的视听记忆；action=rescue 救某丢�条（+0.4 喜好度并延寿 30 天）；action=rate 把用户对当前视频的评价记成分数（明确说喜欢→like，说丢�般→normal，说不喜欢→dislike；用户没评价就不要调用，视为弃权）��rate 不传 id 时自动作用于朢��?30 分钟内的视频记忆�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'rescue', 'rate'] },
+        id: { type: 'string', description: 'rescue / rate 时的记忆 id' },
+        rating: { type: 'string', enum: ['like', 'normal', 'dislike'], description: 'rate 时的用户评价' },
+        reason: { type: 'string', description: 'rescue 时的理由' },
+      },
+      required: ['action'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          items: { type: 'array', items: { type: 'object' } },
+          p0: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) => {
+        if (!value.ok) return [{ type: 'text', text: '失败�? + (value.error || '未知') }]
+        if (Array.isArray(value.items)) {
+          if (value.items.length === 0) return [{ type: 'text', text: '没有霢�要抢救的记忆�? }]
+          const lines = value.items.map(
+            (m, i) => `${i + 1}. [${m.leftHours ?? '?'}h 后到期] ${m.summary}（喜�?${m.p0}，信息量 ${m.delta0}）`,
+          )
+          return [{ type: 'text', text: '待抢救的记忆：\n' + lines.join('\n') }]
+        }
+        return [{ type: 'text', text: `已处理，当前喜好�?${value.p0 ?? '?'}` }]
+      },
+    },
+    execute: async ({ action, id, rating, reason }) => {
+      if (!isHcemSession(currentAgent()?.session)) return { ok: false, error: '�?HCEM 会话' }
+      try {
+        if (action === 'list') {
+          return { ok: true, items: listRescueCandidates(store, { limit: 20 }) }
+        }
+        if (action === 'rescue') {
+          const r = rescueMemory(store, id, { by: 'ai', reason })
+          return { ok: r.ok, p0: r.p0, error: r.error }
+        }
+        if (action === 'rate') {
+          const r = rateWhileWatching(store, id, rating || 'normal')
+          return { ok: r.ok, p0: r.p0, error: r.error }
+        }
+        return { ok: false, error: '未知 action' }
+      } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) }
+      }
+    },
+  })
+
+  defineTool({
+    name: 'hcem_video_storyboard',
+    description: '分析丢�个视频文件：镜头切分 + 代表帧网格，并让视觉模型概括内容（需�?ffmpeg/ffprobe）��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        videoPath: { type: 'string', description: '视频文件绝对路径' },
+        maxCells: { type: 'number', description: '目标格数�?-16，默�?9，即九宫格）' },
+        summary: { type: 'boolean', description: '是否让视觉模型概括内容（默认 true�? },
+      },
+      required: ['videoPath'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          duration: { type: 'number' },
+          segments: { type: 'number' },
+          cuts: { type: 'number' },
+          cells: { type: 'number' },
+          summary: { type: 'string' },
+          frames: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [
+              {
+                type: 'text',
+                text:
+                  `视频 ${value.duration?.toFixed(1)}s�?{value.segments} 段��?{value.cuts} 个切点��?{value.cells} 个代表帧` +
+                  (value.summary ? `\n\n${value.summary}` : ''),
+              },
+            ]
+          : [{ type: 'text', text: '分析失败�? + (value.error || '未知错误') }],
+    },
+    execute: async ({ videoPath, maxCells, summary = true }) => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const safe = safeVideoPath(videoPath)
+      if (!safe.ok) return { ok: false, error: '视频路径不允许：' + safe.error }
+      // 只做分镜（不抽帧、不描述�?
+      if (!summary) {
+        const r = await analyzeVideoStoryboard(safe.path, { maxCells })
+        return {
+          ok: r.ok,
+          duration: r.duration,
+          segments: r.segments,
+          cuts: r.cuts,
+          cells: Array.isArray(r.cells) ? r.cells.length : 0,
+          error: r.error,
+        }
+      }
+      // 分镜 �?抽帧 �?拼图 �?视觉模型概括
+      const d = await digestVideo(safe.path, { maxCells })
+      if (!d.ok) return { ok: false, error: d.error, duration: d.duration }
+      return {
+        ok: true,
+        duration: d.duration,
+        segments: d.segments,
+        cuts: d.cuts,
+        cells: d.frames,
+        frames: d.frames,
+        summary: d.summary,
+      }
+    },
+  })
+  
+  // 5) 状��工具（读真实存储）
+  defineTool({
+    name: 'hcem_status',
+    description: '获取 HCEM 插件当前情绪状��（HSL）��存储状态与数据目录�?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          H: { type: 'number' },
+          S: { type: 'number' },
+          L: { type: 'number' },
+          store: { type: 'string' },
+          dbPath: { type: 'string' },
+          memoryCount: { type: 'number' },
+          tools: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['ok', 'H', 'S', 'L'],
+      },
+      render(args, value) {
+        const hLabel = value.H === 0 ? '0°/360°' : `${value.H}°`
+        return [
+          {
+            type: 'text',
+            text: `HCEM 状��：H=${hLabel} / S=${value.S}% / L=${value.L}% �?存储�?{value.store ?? '未就�?}�?{value.dbPath || '-'}）｜ 记忆 ${value.memoryCount ?? 0} 条`,
+          },
+        ]
+      },
+    },
+    execute: async () => {
+        // 会话门禁：只�?HCEM 模式的会话才能调�?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('�?HCEM 会话，禁止调用此工具')
+        }
+      const saved = store ? store.getEmotion('global') : null
+      const memories = store ? store.listMemories({ limit: 1000 }) : []
+      // 当前这个 agent 实际能看到的工具名��?
+      // 用来回答「HCEM 到底有没有挂�?DSH 原生工具」����?别靠模型自述，看数据�?
+      let tools = []
+      try {
+        const agent = currentAgent()
+        const reg = agent?.ctx?.tools ?? ctx.tools
+        const list = reg?.schemas?.() ?? reg?.definitions?.() ?? []
+        tools = list.map((t) => t?.name).filter(Boolean).sort()
+      } catch {}
+      return {
+        ok: true,
+        H: saved ? saved.H : state.H,
+        S: saved ? saved.S : state.S,
+        L: saved ? saved.L : state.L,
+        store: store ? 'ready' : 'unavailable',
+        dbPath: store ? DB_PATH : '',
+        memoryCount: memories.length,
+        tools,
+      }
+    },
+  })
+
+  // ┢�┢� 合并后的 9 个工具（19 �?9，省�?55% 工具 token）─┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�┢�
+  // 每个只做分发，实现在上面�?defineTool 里，底层 lib 丢�行没动��?
+
+  // 1) 人格：角色卡 / 用户�?/ me
+  registerTool({
+    name: 'hcem_profile',
+    description:
+      '人格卡维护��target=persona 角色卡（你自己的设定�? user 用户卡（你记得的用户信息�? me 第一人称身份摘要。mode=replace 整段替换、append 追加、edit 屢�部改（用 find+replace，find 必须唯一匹配，replace 不填=删除）��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        target: { type: 'string', enum: ['persona', 'user', 'me'], description: '默认 persona' },
+        mode: { type: 'string', enum: ['replace', 'append', 'edit'], description: '默认 replace；edit 时用 find/replace' },
+        text: { type: 'string', description: '整段内容（replace/append，或 target=me�? },
+        find: { type: 'string', description: 'mode=edit 时要替换/删除的片�? },
+        replace: { type: 'string', description: 'mode=edit 时的替换文字；不�?删除' },
+      },
+      required: ['target'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ target = 'persona', mode = 'replace', text, find, replace }) => {
+      if (target === 'me') return toSummary(await impls.hcem_me_edit.execute({ text }))
+      if (mode === 'edit' || find) {
+        return toSummary(
+          await impls.hcem_persona_edit.execute({ find, replace, target: target === 'user' ? 'user' : 'persona' }),
+        )
+      }
+      const impl = target === 'user' ? impls.hcem_user_card_write : impls.hcem_persona_write
+      return toSummary(await impl.execute({ text, mode }))
+    },
+  })
+
+  // 2) 笔记 · 日记
+  registerTool({
+    name: 'hcem_journal',
+    description:
+      '日记本（私人，不注入提示词）。action=list 列出 / read 读全文（�?name�? write 写入（要 name+text，mode=replace 覆盖、append 追加）��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'read', 'write'] },
+        name: { type: 'string', description: '日记标题（read/write 必填�? },
+        text: { type: 'string', description: '正文（write 必填，Markdown�? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '默认 replace' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, name, text, mode = 'replace' }) => {
+      if (action === 'list') return toSummary(await impls.hcem_journal_list.execute({}))
+      if (action === 'read') return toSummary(await impls.hcem_journal_read.execute({ name }))
+      return toSummary(await impls.hcem_journal_write.execute({ name, text, mode }))
+    },
+  })
+
+  // 3) 笔记 · 人物
+  registerTool({
+    name: 'hcem_people',
+    description:
+      '人物关系网��action=list 列出 / read 读某人卡片（�?name�? write 写入（要 name+text，mode=replace 覆盖、append 追加）��联系方式只在本机，不要主动外泄�?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'read', 'write'] },
+        name: { type: 'string', description: '人物称呼（read/write 必填�? },
+        text: { type: 'string', description: '人物卡正文（write 必填�? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '默认 replace' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, name, text, mode = 'replace' }) => {
+      if (action === 'list') return toSummary(await impls.hcem_people_list.execute({}))
+      if (action === 'read') return toSummary(await impls.hcem_people_read.execute({ name }))
+      return toSummary(await impls.hcem_people_write.execute({ name, text, mode }))
+    },
+  })
+
+  // 4) 笔记 · 工作（默认关，见 TOOL_MOD�?
+  registerTool({
+    name: 'hcem_work',
+    description:
+      '工作笔记。action=list 列出 / read 读全文（�?name�? write 记录（要 name+text，mode=append 追加、replace 覆盖）��记录后回一句��我这就把这些事记入我的工作笔记里����?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'read', 'write'] },
+        name: { type: 'string', description: '笔记名（read/write 必填�? },
+        text: { type: 'string', description: '正文（write 必填�? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '默认 append' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, name, text, mode = 'append' }) => {
+      if (action === 'list') return toSummary(await impls.hcem_work_list.execute({}))
+      if (action === 'read') return toSummary(await impls.hcem_work_read.execute({ name }))
+      return toSummary(await impls.hcem_work_write.execute({ name, text, mode }))
+    },
+  })
+
+  // 5) 记忆 · 重要�?
+  registerTool({
+    name: 'hcem_memory',
+    description: '调整丢�条记忆的重要度（pinned）：direction=up �?0.5、down �?0.5（pinned 范围 0~2，缓冲池 0~1）��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: '记忆 id' },
+        direction: { type: 'string', enum: ['up', 'down'], description: '默认 up' },
+      },
+      required: ['id'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ id, direction = 'up' }) => toSummary(await impls.hcem_memory_pin.execute({ id, direction })),
+  })
+
+  // 6) 状��?
+  registerTool({
+    name: 'hcem_status',
+    description: 'HCEM 当前状��：HSL 情绪、存储是否就绪��记忆条数��数据目录��?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: SUMMARY_OUTPUT,
+    execute: async () => toSummary(await impls.hcem_status.execute({})),
+  })
+
+  // 7) 视听 · 看（屏幕 / 视频 / 视听记忆抢救 / 监听状��）
+  registerTool({
+    name: 'hcem_vision',
+    description:
+      '视听能力。kind=screen 看当前屏幕（prompt 可��，问你想看仢�么）/ video 分析视频文件（要 videoPath�? rescue 视听记忆的抢救与评分（action=list|rescue|rate，rate �?rating=like|normal|dislike�? status 查询桌面监听状����?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        kind: { type: 'string', enum: ['screen', 'video', 'rescue', 'status'] },
+        prompt: { type: 'string', description: 'kind=screen 时想看什�? },
+        videoPath: { type: 'string', description: 'kind=video 时的视频文件路径' },
+        maxCells: { type: 'number', description: 'kind=video 的分镜格数（4-16�? },
+        summary: { type: 'boolean', description: 'kind=video 是否让视觉模型概�? },
+        action: { type: 'string', enum: ['list', 'rescue', 'rate'], description: 'kind=rescue 时的动作' },
+        id: { type: 'string', description: 'kind=rescue 时的记忆 id' },
+        rating: { type: 'string', enum: ['like', 'normal', 'dislike'], description: 'kind=rescue、action=rate 时的评价' },
+        reason: { type: 'string', description: 'kind=rescue、action=rescue 时的理由' },
+      },
+      required: ['kind'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ kind, prompt, videoPath, maxCells, summary, action, id, rating, reason }) => {
+      if (kind === 'screen') return toSummary(await impls.hcem_screen_look.execute({ prompt }))
+      if (kind === 'video') return toSummary(await impls.hcem_video_storyboard.execute({ videoPath, maxCells, summary }))
+      if (kind === 'status') {
+        // screen_status 以前只在提示词里出现过��没注册过；这里就地实现
+        const s = loadSettings(SETTINGS_PATH)
+        const on = s.listening === true
+        const age = lastScreenAt ? Math.round((Date.now() - lastScreenAt) / 1000) : -1
+        const bits = [`桌面监听�?{on ? '弢��? : '关闭'}`]
+        bits.push(age >= 0 ? `朢�近画面：${age} 秒前` : '朢�近画面：�?)
+        if (lastScreenDesc) bits.push('画面描述�? + String(lastScreenDesc).slice(0, 100))
+        return { ok: true, summary: bits.join('�?) }
+      }
+      return toSummary(await impls.hcem_memory_rescue.execute({ action, id, rating, reason }))
+    },
+  })
+
+  // 8) 视听 · 听（新增：主动录丢�段并分析�?
+  registerTool({
+    name: 'hcem_listen',
+    description:
+      '主动听一下周围：录一小段（默�?5 秒，朢��?15 秒），返回转写文�?+ 声音分类�? +
+      'mode=music 时改为录音乐分析（BPM/调��?和弦/段落），此时秒数可给�?10~60，越长越准（默认 20）��? +
+      'audioPath 给了就只分析那个音频/视频文件、不录音（视频会自动抽音轨）�? +
+      'videoPath �?audioPath 的同义写法，专给视频用��?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        seconds: { type: 'number', description: '录音时长：voice 模式 1-15（默�?5）；music 模式 10-60（默�?20�? },
+        mode: { type: 'string', enum: ['voice', 'music'], description: 'voice=转写分类（默认）；music=音乐分析' },
+        audioPath: { type: 'string', description: '要分析的音频/视频文件路径（给了就不录音）' },
+        videoPath: { type: 'string', description: '视频文件路径（等�?audioPath，会抽音轨再识别�? },
+      },
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ seconds, mode, audioPath, videoPath } = {}) => {
+      const s = Math.max(1, Math.min(15, Number(seconds) || 5))
+      const wantMusic = mode === 'music'
+      const filePath = videoPath || audioPath
+      try {
+        // 给定了文件：不录音，直接分析
+        if (filePath) {
+          const isVideo = /\.(mp4|mkv|mov|avi|webm|flv|m4v|ts|wmv)$/i.test(String(filePath))
+          let target = String(filePath)
+          // 视频先抽音轨：ffmpeg �?16k 单声�?wav，后�?ASR/音乐分析都能�?
+          if (isVideo) {
+            const outWav = join(DATA_DIR, 'audio', `video-${Date.now()}.wav`)
+            mkdirSync(join(DATA_DIR, 'audio'), { recursive: true })
+            target = await extractAudioFromVideo(String(filePath), outWav)
+          }
+          // 音乐分析（含情感�?
+          if (wantMusic) {
+            const m = await analyzeMusicDeep(target)
+            if (!m.ok) return { ok: false, summary: '音乐分析失败�? + String(m.error || '') }
+            return { ok: true, summary: (isVideo ? '已抽音轨�? : '') + m.text }
+          }
+          // 人声识别：Qwen3-ASR（自�?VAD 分段，见 lib/audio/asr.mjs�?
+          const asr = await transcribe(target)
+          if (!asr.ok) return { ok: false, summary: '识别失败�? + String(asr.error || '') }
+          const parts = []
+          if (isVideo) parts.push('已从视频抽出音轨')
+          const text = String(asr.text || '').trim()
+          parts.push(text ? '听到�? + text.slice(0, 800) : '（没有识别到人声�?)
+          // 顺手带一份音乐分析，视频里常有配�?
+          try {
+            const info = await analyzeMusic(target, { maxSeconds: 60 })
+            if (info.ok && info.kind !== 'speech' && info.text) parts.push('音乐�? + info.text)
+          } catch {}
+          return { ok: true, summary: parts.join('\n') }
+        }
+        // 音乐模式：单独录丢�段长的再做分析��?
+        // 不走 audioTick —��?那套还要�?ASR/情绪/PANNs，要 60 秒；
+        // 而音乐分析需要的是长度，不是更多模型�?
+        if (wantMusic) {
+          const seconds2 = Math.max(10, Math.min(60, Number(seconds) || 20))
+          const m = await recordAndAnalyzeMusic({ dataDir: DATA_DIR, seconds: seconds2 })
+          if (!m.ok) return { ok: false, summary: '音乐分析失败�? + String(m.error || '') }
+          return { ok: true, summary: `录了 ${m.seconds} 秒��?{m.text}` }
+        }
+        const r = await audioTick({ dataDir: DATA_DIR, seconds: s })
+        const parts = []
+        if (r?.kind || r?.categoryName) parts.push('场景�? + String(r.categoryName || r.kind))
+        if (r?.text) parts.push('听到�? + String(r.text).slice(0, 500))
+        if (r?.soundDesc) parts.push(String(r.soundDesc).slice(0, 300))
+        // 感知层后台跑过的音乐深分析，顺手带上（可能来自最近几分钟�?
+        const info = r?.musicInfo
+        if (info?.ok) parts.push('音乐�? + info.text)
+        return { ok: r?.ok !== false, summary: parts.join('\n') || '（没听到明显声音�? }
+      } catch (error) {
+        return { ok: false, summary: '录音失败�? + String((error && error.message) || error) }
+      }
+    },
+  })
+
+  // 9) 说（发消�?/ TTS�?
+  registerTool({
+    name: 'hcem_voice',
+    description:
+      '说话 / 通话。action=speak �?TTS 说一句（�?text，沿用当前情绪语气）/ send 把一条消息��进指定 HCEM 会话（要 text，sessionId 不填=当前会话�? +
+      '/ call_start 弢�始语音��话（一直听，听到就答，用户弢�口会打断播报�? call_stop 挂断 / call_status 查��话状����?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['speak', 'send', 'call_start', 'call_stop', 'call_status'] },
+        text: { type: 'string', description: '要说/发的内容' },
+        sessionId: { type: 'string', description: 'action=send 的目标会话（可��）' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, text, sessionId }) => {
+      if (action === 'send') return toSummary(await impls.hcem_send_to_session.execute({ sessionId, text }))
+      if (action === 'call_status') {
+        const s = voiceCall ? voiceCall.status() : { active: false, speaking: false, iterations: 0, bargesIn: 0 }
+        return { ok: true, summary: s.active ? `通话中（已听 ${s.iterations} 句，打断 ${s.bargesIn} �?{s.speaking ? '，正在说�? : ''}）` : '没有在��话' }
+      }
+      if (action === 'call_start') {
+        const c = ensureVoiceCall()
+        const r = c.start()
+        return { ok: r.ok !== false, summary: r.already ? '通话已经在进�? : '通话已开始：我会丢�直听睢�，你说话我就答，你开口我就停�? }
+      }
+      if (action === 'call_stop') {
+        if (!voiceCall) return { ok: true, summary: '本来就没在��话' }
+        await voiceCall.stop()
+        return { ok: true, summary: '通话已结束��? }
+      }
+      try {
+        const e = store?.getEmotion('global') || { H: 360, S: 15, L: 55 }
+        const outPath = join(DATA_DIR, 'tts', 'say-' + Date.now() + '.wav')
+        const r = await speakReply({ text: String(text || ''), H: e.H, S: e.S, L: e.L, outPath, play: true })
+        return r?.ok
+          ? { ok: true, summary: '已说�? + String(text).slice(0, 120) }
+          : { ok: false, summary: 'TTS 失败�? + String(r?.error || 'unknown') }
+      } catch (error) {
+        return { ok: false, summary: 'TTS 异常�? + String((error && error.message) || error) }
+      }
+    },
+  })
+
+  // 4) 关闭时清�?
+  ctx.effect(
+    () => () => {
+      try {
+        store?.close()
+      } catch {
+        // ignore
+      }
+    },
+    'hcem.store.dispose',
+  )
+}

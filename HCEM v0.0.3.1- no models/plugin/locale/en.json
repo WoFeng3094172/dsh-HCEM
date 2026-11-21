@@ -1,0 +1,6 @@
+{
+    "meta":  {
+                 "description":  "HSL-Chroma Emotion Memory System: gives an AI human-like emotional swings and a memory-based reasoning system.\nHCEM settings let you customize the AI persona, but the AI\u0027s emotional character changes with the memories you build together.\nHCEM does not exhaust its context.\nHCEM allows mild hallucination when emotions are polarized.\nHCEM\u0027s storageDomain is independent of DSH\u0027s native workspace.\nHCEM can remember work you assign, but it is for companionship only, not rigorous work.\nPlease treat it like a real companion.",
+                 "title":  "HCEM"
+             }
+}

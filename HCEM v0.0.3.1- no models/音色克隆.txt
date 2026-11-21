@@ -1,0 +1,13 @@
+1. 把3~10s的音频丢进  data\voices\incoming\
+     · 支持 wav / mp3 / m4a / flac / ogg
+     · 想要更准：同目录放一个同名 .txt 写它说的内容
+2. 启动 DSH（TTS 服务启动时会自动扫这个目录）
+     · 有 .txt 直接用；没有就自动 ASR 转写（慢几秒）
+     · 自动转成 24k 单声道、写入 voices/<名字>.wav + .txt
+     · 原文件归档到 incoming/done/
+3. 想让它当默认音色：voice.json 里 mode=clone
+
+
+也可以用命令行手动触发：node plugin/lib/tts/import-voice.mjs
+
+提醒：克隆音色在常驻服务里会被强制加英文 AI 声明，所以克隆模式下我们走 CLI 合成（没有声明，但每句慢些）。这一点在描述里我写进 models.md 时再说明。

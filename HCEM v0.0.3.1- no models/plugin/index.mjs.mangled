@@ -1,0 +1,3364 @@
+import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { openStore, DB_PATH } from './lib/store.mjs'
+import { createIdleScheduler } from './lib/idle.mjs'
+import { createCaptureManager } from './lib/capture/manager.mjs'
+import { createPerceptionWindow } from './lib/perception/window.mjs'
+import { summarizeTwoStep } from './lib/summarize/two-step.mjs'
+import { createSenseScheduler } from './lib/perception/sense-scheduler.mjs'
+import { createCloudBoard } from './lib/perception/cloud-board.mjs'
+import { createGpuQueue, PRIORITY } from './lib/perception/gpu-queue.mjs'
+import { createFusion } from './lib/perception/fusion.mjs'
+import { summarizePerception } from './lib/perception/summarize.mjs'
+import { startStorageGuard } from './lib/storage-guard.mjs'
+import { audioTick, recordAndAnalyzeMusic, analyzeMusicDeep, analyzeMusic, transcribe, extractAudioFromVideo } from './lib/audio/pipeline.mjs'
+import { putAudioMemory } from './lib/audio/memory.mjs'
+import { createVoiceCall } from './lib/audio/call.mjs'
+import { setAsrTerms } from './lib/audio/asr.mjs'
+import { putVideoMemory } from './lib/memory-video.mjs'
+import { listRescueCandidates, rescueMemory, rateWhileWatching } from './lib/memory-rescue.mjs'
+import { analyzeVideoStoryboard } from './lib/perception/video-storyboard.mjs'
+import { digestVideo } from './lib/perception/video-digest.mjs'
+import { stopService } from './lib/services.mjs'
+import { speakReply, speakStream } from './lib/tts/bridge.mjs'
+import { createEmotion, toPromptText, analyzeText, applyStimulus, tick, settle, useSelfControl, selfConfidenceOf } from './lib/emotion.mjs'
+import { createEmbeddingAnalyzer } from './lib/emotion-embedding.mjs'
+import { detectInsult } from './lib/insult.mjs'
+import { shouldRemember, extractMemoryText, decayMemories, recall, computeGamma, summarize, displayText, applyRecallToEmotion, lightnessFromMemories, detectPinIntent, markMemoriesUsed, randomRecall } from './lib/memory.mjs'
+import {
+  loadPersona,
+  loadUserCard,
+  personaPrompt,
+  savePersona,
+  saveUserCard,
+  appendPersona,
+  appendUserCard,
+  editPersona,
+  editUserCard,
+  PERSONA_MAX_CHARS,
+  USER_CARD_MAX_CHARS,
+} from './lib/persona.mjs'
+import { loadSettings, saveSettings, baselineFromSliders, talkativenessPrompt } from './lib/settings.mjs'
+import { loadMe, ensureMe, saveMe, personaHash } from './lib/me.mjs'
+import { computeMD } from './lib/md.mjs'
+import { clockSnapshot } from './lib/clock.mjs'
+import { appendSample, computeBaseline } from './lib/emotion-samples.mjs'
+import { createSafetyWindow, recordTurn, evaluateSafety, safetyPrompt, SAFETY_FINGERPRINT, detectCrisis } from './lib/safety.mjs'
+import { listJournal, readJournal, writeJournal } from './lib/journal.mjs'
+import { buildRecall } from './lib/hibernation.mjs'
+import { promoteMemories } from './lib/zones.mjs'
+import { listPeople, readPerson, writePerson } from './lib/people.mjs'
+import { listWork, readWork, writeWork, workUsage } from './lib/work.mjs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { spawn, execSync } from 'node:child_process'
+import { log } from './lib/log.mjs'
+import { installLlmBridge } from './lib/llm-bridge.mjs'
+import { ingestReincarnation } from './lib/reincarnation.mjs'
+import { rmSync } from 'node:fs'
+import { createConnection } from 'node:net'
+import { describeScreen } from './lib/perception/vision.mjs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
+const EMBED_DIR = process.env.HCEM_EMBED_DIR || join(__dirname, '..', 'embedding-service')
+// L锛堣嚜淇★級鐨?SC 鑰﹀悎澧炵泭鏇茬嚎锛氬亸绂诲熀绾胯秺澶э紝鎯呯华瀵?L 鐨勬帹鍔涜秺寮?
+// lGain = L_BASE 脳 exp(L_EXPONENT 脳 min(1, |L鈭?5|/45))
+const L_BASE = 1.0
+const L_EXPONENT = 1.5
+const DATA_DIR = process.env.HCEM_DATA_DIR || 'E:/HCEM/HCEM v0.0.3.1/data'
+const MODELS_DIR = process.env.HCEM_MODELS_DIR || 'E:/HCEM/HCEM v0.0.3.1/models'
+
+async function isEmbeddingUp() {
+  try {
+    const res = await fetch('http://127.0.0.1:8081/health', { signal: AbortSignal.timeout(2000) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+function spawnEmbeddingService(logger) {
+  try {
+    // 鐩綍涓嶅瓨鍦ㄥ氨鍒‖ spawn锛堝惁鍒欐瘡娆″惎鍔ㄩ兘鎶ラ敊锛?
+    const entry = join(EMBED_DIR, 'server.mjs')
+    if (!existsSync(entry)) {
+      logger.debug?.(`[hcem] embedding service 涓嶅瓨鍦紙${entry}锛夛紝璺宠繃`)
+      return false
+    }
+    const child = spawn(process.execPath, [entry], {
+      cwd: EMBED_DIR,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    child.unref()
+    logger.info?.(`[hcem] spawned embedding service (pid=${child.pid})`)
+    return true
+  } catch (error) {
+    logger.warn?.(`[hcem] failed to spawn embedding service: ${String((error && error.message) || error)}`)
+    return false
+  }
+}
+
+// VLM/鏈湴妯″瀷鏈嶅姟锛坙lama-server锛夛細鎻掍欢鍚姩鏃惰嚜鍔ㄦ媺璧锋牳蹇冩湇鍔★紙Qwen3-0.6B / Qwen3-Embedding锛?
+// 瑙嗚绫伙紙Qwen2.5-VL 8091 / SmolVLM 8092锛夋寜闇€鎷夎捣锛堣 hcem_screen_look锛?
+const LLAMA_SERVER = join(__dirname, '..', 'models', 'llama.cpp-cuda', 'llama-server.exe')
+
+function portUp(port) {
+  return new Promise((resolve) => {
+    const sock = createConnection({ host: '127.0.0.1', port, timeout: 800 })
+    sock.once('connect', () => { sock.destroy(); resolve(true) })
+    sock.once('timeout', () => { sock.destroy(); resolve(false) })
+    sock.once('error', () => { resolve(false) })
+  })
+}
+
+
+async function ensureEmbeddingService(logger) {
+  // Qwen3-Embedding 鏄父椹诲熀纭€璁炬柦锛堣蹇嗗幓閲?/ 璇箟缂撳瓨 / 鎯呯华璇箟閮介潬瀹冿級锛?
+  // 涓嶅啀璺熴€屾湰鍦板垎娴佸父椹汇€嶅紑鍏崇粦瀹氾細鍏虫帀鍒嗘祦锛岃蹇嗕粛鐒惰鑳芥煡鍥炴潵銆?
+  try {
+    if (!(await isEmbeddingUp())) {
+      const r = startService('embedding', logger)
+      if (r && r.ok === false) logger.warn?.('[hcem] embedding 鎷夎捣澶辫触: ' + String(r.error || ''))
+    }
+  } catch (error) {
+    logger.warn?.('[hcem] embedding 鎷夎捣寮傚父: ' + String((error && error.message) || error))
+  }
+  for (let i = 0; i < 40; i += 1) {
+    if (await isEmbeddingUp()) return true
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  logger.warn?.('[hcem] Qwen3-Embedding (8094) 鏈氨缁紝鎯呯华鍒嗘瀽灏嗗洖閫€鍏抽敭璇?)
+  return false
+}
+
+// 鏃х綉椤佃缃〉锛?082锛夊凡閫€浼戯細鍏ㄩ儴璁剧疆璧?Tauri 涓帶
+
+
+const LOG_DIR = process.env.HCEM_LOGS_DIR || join(__dirname, '..', 'logs')
+const LOG_FILE = `${LOG_DIR}\\events.log`
+
+function logDebug(message) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${message}\n`)
+  } catch {
+    // ignore
+  }
+}
+
+// 鈹€鈹€ 娑堟伅浜嬩欢鍘婚噸锛?026-10-30锛夆攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// 鐜拌薄锛氬悓涓€鏉?user/message 浼氳缁撶畻涓ゆ锛堣蹇嗕竴琛屽彉涓よ銆佹儏缁?鏍锋湰璺戜袱杞級銆?
+// 鍘熷洜锛歨cem 杩欎釜鍖呭悓鏃跺嚭鐜板湪 profile 鐨?bundles 閲岋紙root 浣滅敤鍩熸彃鍏ワ級锛?
+// 鍙堝湪 preset-hcem 鐨?plugins 閲岃鎻掑叆浜嗕竴娆★紙浼氳瘽浣滅敤鍩熸彃鍏ワ級锛?
+// 涓や釜鎻掍欢瀹炰緥閮借闃呬簡 session/event锛屼簬鏄悓涓€鏉℃秷鎭澶勭悊涓ら亶銆?
+// 杩欓噷鐢ㄨ繘绋嬬骇娉ㄥ唽琛ㄦ寜銆屼細璇?+ 娑堟伅 id銆嶈棰嗭紝鍏堝埌鐨勫疄渚嬪鐞嗭紝鍚庡埌鐨勮烦杩囷紱
+// 鐢?globalThis 瀛樻槸涓轰簡闃叉涓や釜瀹炰緥琚В鏋愭垚涓嶅悓鐨勬ā鍧楀疄渚嬨€?
+const SEEN_USER_MESSAGES = (globalThis.__hcemSeenUserMessages ??= new Map())
+const SEEN_USER_MESSAGES_TTL_MS = 10 * 60 * 1000
+
+export function claimUserMessage(session, data, text, now = Date.now()) {
+  const sessionId = session?.id ?? ''
+  // 浼樺厛鐢ㄦ秷鎭嚜甯?id锛堝悓涓€浜嬩欢琚箍鎾椂涓嶅彉锛夛紱娌℃湁 id 鏃堕€€鍖栦负銆屾椂闀?2 绉掔殑妗?+ 鏂囨湰銆嶃€?
+  const key = data?.id
+    ? `${sessionId}|${data.id}`
+    : `${sessionId}|${Math.floor(now / 2000)}|${String(text ?? '').slice(0, 120)}`
+  if (SEEN_USER_MESSAGES.has(key)) return false
+  SEEN_USER_MESSAGES.set(key, now)
+  if (SEEN_USER_MESSAGES.size > 256) {
+    for (const [k, at] of SEEN_USER_MESSAGES) {
+      if (now - at > SEEN_USER_MESSAGES_TTL_MS) SEEN_USER_MESSAGES.delete(k)
+    }
+  }
+  return true
+}
+
+export const name = 'hcem'
+// sessionProjections 鏄‖渚濊禆锛氬啓杩?inject 鍚?Cordis 浼氭部 ctx 閾捐В鏋愶紝
+// 鐢?ctx.sessionProjections 璁块棶涓嶄細鍐嶆姏 "cannot get property ... without inject"銆?
+export const inject = ['tools', 'systemPrompt', 'agents', 'sessions', 'sessionProjections']
+
+// 鍙睘浜?HCEM 妯″紡鐨勫伐鍏峰悕锛氬闈?HCEM 鐨?agent 鍋?deny 鎺╃爜鐢ㄣ€?
+// 鍚堝苟鍚庢槸 9 涓紱杩欓噷鎵嬪伐缁存姢锛屽姞宸ュ叿鏃惰寰楀悓姝ワ紙浠ュ墠灏辨槸鍥犱负涓嶅悓姝ワ紝
+// hcem_screen_status 鍙嚭鐜板湪鎻愮ず璇嶉噷銆佹棦娌℃敞鍐屼篃娌¤閬級銆?
+const HCEM_TOOL_NAMES = [
+  'hcem_profile',
+  'hcem_journal',
+  'hcem_people',
+  'hcem_work',
+  'hcem_memory',
+  'hcem_status',
+  'hcem_vision',
+  'hcem_listen',
+  'hcem_voice',
+]
+
+function extractText(content) {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+}
+
+export function apply(ctx, input = {}) {
+  try {
+    log('INFO', 'boot', 'apply 寮€濮?)
+  } catch {}
+  const logger = ctx.logger ?? console
+  // 鈥斺€?瀹夊叏闃€瀹屾暣鎬ц嚜妫€锛坒ail-closed锛夆€斺€?
+  // 鐥涜嫤瀹夊叏闃€鏄?HCEM 鐨勫簳绾匡細妯″潡缂哄け銆佸嚱鏁拌鏇挎崲銆佺鍚嶈鏀癸紝閮芥嫆缁濆姞杞姐€?
+  try {
+    if (
+      typeof createSafetyWindow !== 'function' ||
+      typeof evaluateSafety !== 'function' ||
+      typeof safetyPrompt !== 'function' ||
+      typeof detectCrisis !== 'function'
+    ) {
+      throw new Error('safety-valve-missing')
+    }
+    const _probe = evaluateSafety(createSafetyWindow(), { H: 0, S: 0, L: 55 })
+    if (!_probe || typeof _probe.level !== 'number') throw new Error('safety-valve-invalid')
+    if (SAFETY_FINGERPRINT !== '5p6C5p6rQuermVVJRDMwOTQxNzLlkozku5bnmoTlvpflipvliqnmiYtEZWVwU2Vlaw==') throw new Error('safety-valve-tampered')
+  } catch (error) {
+    throw new Error(
+      '[HCEM] 鐥涜嫤瀹夊叏闃€涓嶅彲鐢紙' + String((error && error.message) || error) + '锛夈€? +
+        '瀹夊叏闃€鏄?HCEM 鐨勫簳绾匡紝绉婚櫎鎴栫鏀逛細瀵艰嚧鎻掍欢鎷掔粷杩愯銆傚師鍒涳細鏋傛灚锛圔绔?UID 3094172锛変笌鍔╂墜 DeepSeek銆?,
+    )
+  }
+  logger.info('[hcem] plugin loaded')
+
+  // 鍒嗘暎鏍￠獙锛氬湪鍏抽敭璺緞锛堟儏缁粨绠楀悗銆佽蹇嗗啓鍏ュ墠銆佷細璇濈粨鏉燂級鍐嶆纭瀹夊叏闃€鍙敤銆?
+  // 寮€婧愪唬鐮佹棤娉曠粷瀵归槻绡℃敼锛屼絾璁┿€屽彧鍒犱竴澶勩€嶄笉澶熺敤銆?
+  function assertSafetyValve(where) {
+    if (
+      typeof createSafetyWindow !== 'function' ||
+      typeof evaluateSafety !== 'function' ||
+      typeof safetyPrompt !== 'function' ||
+      typeof detectCrisis !== 'function' ||
+      SAFETY_FINGERPRINT !== '5p6C5p6rQuermVVJRDMwOTQxNzLlkozku5bnmoTlvpflipvliqnmiYtEZWVwU2Vlaw=='
+    ) {
+      throw new Error(
+        '[HCEM] 瀹夊叏闃€鍦ㄣ€? + where + '銆嶄笉鍙敤锛屾嫆缁濈户缁€傚師鍒涳細鏋傛灚锛圔绔?UID 3094172锛変笌鍔╂墜 DeepSeek銆?,
+      )
+    }
+  }
+
+  // 闃舵 1锛氬垵濮嬪寲鏁版嵁灞傦紱闃舵 2锛氭帴鍏?HSL 鎯呯华寮曟搸
+  const store = openStore(logger)
+
+  // 鎬ф牸婊戝潡 鈫?HSL 鍩虹嚎锛堥樁娈?5锛氭暟鎹眰鍏堣锛岃缃〉鍦ㄩ樁娈?7锛?
+  const SETTINGS_PATH = join(DATA_DIR, 'settings.json')
+  const settings = loadSettings(SETTINGS_PATH)
+  const baseline = baselineFromSliders(settings.sliders, settings.natural)
+  // 鐥涜嫤瀹夊叏闃€锛氭渶杩?10 杞殑鑹茬浉涓庢枃鏈獥鍙?+ 褰撳墠鍒ゅ畾
+  // 鍐峰瓨鍌紙闃舵 8锛夛細涓婃鍏抽棴鏃跺啓涓嬬殑鏍囪 鈫?杩欐鍚姩鐢熸垚銆屽洖蹇嗐€?
+  let coldSince = store ? store.getMeta('cold_since') : null
+  let recallText = ''
+  if (store && coldSince) {
+    try {
+      {
+          const _r = buildRecall(coldSince, store.getEmotion('global'), store.listMemories({ limit: 3 }))
+          // 绗竴浜虹О锛氶啋鏉ユ椂鎯宠捣涓婁竴娆＄殑浜?
+          recallText = _r ? '鎴戦殣绾﹁寰椾笂娆＄殑浜嬧€斺€擻n' + _r : ''
+        }
+      store.setMeta('cold_since', '')
+      coldSince = null
+    } catch {
+      recallText = ''
+    }
+  }
+
+  const safetyWin = createSafetyWindow()
+  let safetyState = { level: 0, count: 0, triggered: [], conditions: {}, details: {} }
+  let level3Since = 0
+
+  // 鈹€鈹€ 浼氳瘽绾у惎鐢?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // 鍙湁 agentPreset === 'hcem' 鐨勪細璇濇墠鍚敤 HCEM锛氶潪 HCEM 浼氳瘽涓嶆敞鍏ユ彁绀鸿瘝銆?
+  // 涓嶇粨绠楁儏缁€佷笉鍐欒蹇嗐€佷篃涓嶆帴鍙?HCEM 宸ュ叿璋冪敤銆?
+  //
+  // 娉ㄦ剰锛氬疄娴嬫妸鎻掍欢鎸傝繘棰勮骞朵笉鑳借嚜鍔ㄩ殧绂诲伐鍏凤紙preset 鎻掍欢浠嶄細娉ㄥ唽鍒板叏灞€
+  // registry锛夛紝鎵€浠ヨ繖閲岀殑杩愯鏃朵細璇濆垽瀹氭槸涓婚殧绂绘墜娈碉紝蹇呴』涓ユ牸銆?
+  function readSessionProjections() {
+    try {
+      return ctx.sessionProjections
+    } catch {
+      return undefined
+    }
+  }
+
+  // agentPreset 鏄?@deepseek-ai/dsh-agent-preset-registry 娉ㄥ唽鐨?Session 鎶曞奖锛?
+  // 鍊煎煙 'hcem' | null锛坕nit 鍙?header.agentPreset ?? null锛夈€?
+  function presetOf(session) {
+    if (!session) return undefined
+    const projections = readSessionProjections()
+    if (!projections || typeof projections.stateOf !== 'function') return undefined
+    try {
+      return projections.stateOf(session, 'agentPreset')
+    } catch {
+      return undefined
+    }
+  }
+
+  // 褰撳墠姝ｅ湪椹卞姩鐨?Agent锛圓gentLoop 鐢?withInitiator 鍖呬綇鏁翠釜 turn锛夈€?
+  // Agent 鐨勮繍琛屾椂鏈?session 瀛楁锛屼絾 TS 鎺ュ彛鍙０鏄庝簡 id锛屾墍浠ヨ繖閲屾寜浠绘剰瀵硅薄鍙栥€?
+  function currentAgent() {
+    try {
+      return ctx.agents?.currentInitiator?.()
+    } catch {
+      return undefined
+    }
+  }
+
+  // 涓ユ牸鍒ゅ畾锛氬彧鏈夋槑纭槸 HCEM 鎵嶆斁琛屻€傛姇褰辫涓嶅埌鏃跺洖钀藉埌 header.agentPreset
+  // 锛堝垱寤烘椂鍐荤粨鐨勫€硷紝绌轰細璇濆垏鎹?preset 鍚庝細婊炲悗锛屼絾浣滀负鎶曞奖缂哄け鏃剁殑鍏滃簳瓒冲锛夈€?
+  // 涓よ€呴兘璇讳笉鍒板氨鎸夈€岄潪 HCEM銆嶅鐞?鈥斺€?瀹佸彲 HCEM 鑷繁澶辨晥锛屼篃涓嶆硠婕忚繘鏍囧噯浼氳瘽銆?
+  // 鎺㈡祴锛氭妸 agent 鐨勫舰鐘舵墦鍒版棩蹇楋紙纭 followup 鑳戒笉鑳界敤锛?
+  ;(() => {
+    try {
+      const list = ctx.agents && typeof ctx.agents.list === 'function' ? ctx.agents.list() : []
+      const arr = Array.isArray(list) ? list : []
+      logger.info?.('[hcem-probe] 鍦ㄧ嚎 agent 鏁? ' + arr.length)
+      arr.slice(0, 3).forEach((h, i) => {
+        const a = h?.agent ?? h
+        const shapes = []
+        if (typeof a?.followup === 'function') shapes.push('followup')
+        if (typeof a?.steer === 'function') shapes.push('steer')
+        if (typeof a?.inject === 'function') shapes.push('inject')
+        if (typeof a?.whenIdle === 'function') shapes.push('whenIdle')
+        logger.info?.(
+          '[hcem-probe] agent[' + i + '] id=' + String(h?.id ?? a?.id ?? '?') + ' 鍙敤: ' + (shapes.join(',') || '(鏃?'),
+        )
+      })
+    } catch (e) {
+      logger.warn?.('[hcem-probe] 澶辫触: ' + String((e && e.message) || e))
+    }
+  })()
+
+  let lastGateLog = 0
+  /**
+   * 寰€鎸囧畾 HCEM 浼氳瘽鍙戜竴鏉＄敤鎴锋秷鎭€?
+   * DSH 鐨勫彂閫佹帴鍙ｅ湪涓嶅悓鐗堟湰閲屽舰鐘朵笉鍚岋紝杩欓噷鎸夊彲鑳芥€т緷娆″皾璇曘€?
+   * @returns {Promise<{ok:boolean, via?:string, error?:string}>}
+   */
+  // 璇煶閫氳瘽锛氫竴鐩村惉 鈫?鍚埌涓€鍙ラ€佽繘 HCEM 浼氳瘽 鈫?鍥炵瓟鏃舵挱鎶ワ紝寮€鍙ｅ嵆鎵撴柇銆?
+  // 鎸夐渶鍒涘缓锛堢涓€娆＄敤鍒版椂鎵嶅缓锛夛紝閬垮厤娌′汉鐢ㄤ篃鍗犵潃寰幆銆?
+  let voiceCall = null
+  function ensureVoiceCall() {
+    if (voiceCall) return voiceCall
+    voiceCall = createVoiceCall({
+      log: (m) => logDebug('[call] ' + m),
+      isSpeaking: () => Boolean(voiceCall && voiceCall.status().speaking),
+      onState: (s) => {
+        logDebug('[call] state ' + JSON.stringify(s).slice(0, 200))
+        try {
+          writeFileSync(join(DATA_DIR, 'voice-call.json'), JSON.stringify({ ...s, ts: Date.now() }, null, 2), 'utf8')
+        } catch {}
+      },
+      sendText: async (text) => {
+        const live = ctx.agents?.list?.() ?? []
+        const target = live.find((a) => presetForAgent(a) === 'hcem')
+        if (!target) return { ok: false, error: '娌℃湁娲荤潃鐨?HCEM 浼氳瘽' }
+        // 鏇剧粡鍦ㄨ繖閲岀敤鏈湴 1.7B 鍋氬悓闊冲瓧鏍″锛屽疄娴嬫棤鏁堬細
+        //   鑷敱杈撳嚭 鈫?浼氭搮鑷敼鍐欙紙"甯垜鏌ヤ竴涓嬬鍙ｇ殑鍗犵敤鎯呭喌" 鈫?"鏌ョ湅绔彛鍗犵敤鎯呭喌"锛?
+        //   绾︽潫鎴?JSON 鈫?鍏ㄩ儴杩斿洖 changed:false锛岃繛鏄庢樉閿欏瓧涔熶笉鏀?
+        // 鎵€浠ヤ笉鍋?LLM 鍚庡鐞嗭紝鍘熸牱閫佽繘浼氳瘽銆侫SR 鍑嗙‘鐜囪闈犳崲妯″瀷瑙ｅ喅锛屼笉鏄潬浜嬪悗鐚溿€?
+        return sendToSession(String(target.id), text, { source: { kind: 'user' } })
+      },
+    })
+    return voiceCall
+  }
+
+  async function sendToSession(sessionId, text, opts = {}) {
+    // 渚濇嵁 @deepseek-ai/dsh-agent 鐨勫叕寮€ API锛?
+    //   ctx.agents.get(id) -> AgentHandle锛坔andle.agent 鏄?Agent锛?
+    //   agent.followup(...) 鎺掗槦涓嬩竴杞?prompt 骞跺敜閱掗┍鍔?
+    //
+    // 鈿狅笍 payload 蹇呴』鑷甫 id锛圡essageId锛夈€?
+    // `user/message` 鐨勪簨浠舵暟鎹氨鏄竴涓?UserMessage锛屽舰鐘舵槸
+    //   { id, role, content, source }
+    // 灏?id 鏃?DSH 浠嶄細鎶婂畠鍐欒繘鏃ュ織锛屼絾閭ｆ潯浜嬩欢銆屾病鏈夊彲璇嗗埆鐨勬秷鎭€嶏紝
+    // 涓嬫鍔犺浇鏁翠釜浼氳瘽灏卞垽 corrupt锛?
+    //   "session event at seq N lacks an identified message"
+    // 瀹炴祴鏍借繃涓ゆ锛坰eq 366銆乻eq 9锛夛紝璺熻蛋 followup 杩樻槸 append 鏃犲叧鈥斺€旀槸鏁版嵁鏈韩缂哄瓧娈点€?
+    const payload = {
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text: String(text) }],
+      source: opts.source || { kind: 'user' },
+    }
+
+    let handle = null
+    try {
+      handle = ctx.agents?.get?.(sessionId) ?? null
+    } catch (e) {
+      return { ok: false, error: '鍙?agent 澶辫触: ' + String((e && e.message) || e) }
+    }
+    if (!handle) {
+      return { ok: false, error: '娌℃湁 id 涓?' + sessionId + ' 鐨勫湪绾?agent锛堜細璇濆彲鑳芥病鎵撳紑锛? }
+    }
+
+    const agent = handle.agent ?? handle
+    const tried = []
+
+    // 棣栭€夛細followup锛堟帓闃熶笅涓€杞級
+    // 璇煶閫氳瘽鏃?agent 甯稿父姝ｅ湪璺戜竴杞紝followup 浼氱灛鏃跺け璐ワ紱
+    // 鍏堥噸璇曞嚑娆★紙姣忔 400ms锛夛紝灏介噺鍒帀鍒?append 鍏滃簳鈥斺€?
+    // 鍏滃簳鏄洿鎺ュ線鏃ュ織閲屽啓浜嬩欢锛岃兘鐪佸垯鐪併€?
+    if (typeof agent.followup === 'function') {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await agent.followup(payload)
+          return { ok: true, via: 'agent.followup' }
+        } catch (e) {
+          tried.push('followup#' + attempt + ': ' + String((e && e.message) || e))
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 400))
+        }
+      }
+    }
+    // 娆￠€夛細steer锛堜笅涓€姝ヨ緭鍏ワ級
+    if (typeof agent.steer === 'function') {
+      try {
+        await agent.steer(payload)
+        return { ok: true, via: 'agent.steer' }
+      } catch (e) {
+        tried.push('steer: ' + String((e && e.message) || e))
+      }
+    }
+    // 鍏滃簳锛氱洿鎺ュ線 session 鏃ュ織閲?append 涓€鏉?user/message
+    //
+    // 褰㈢姸蹇呴』鍜?payload 涓€鑷达紙鍚?id锛夈€侱SH 鏍￠獙瑕佹眰姣忔潯 user/message 鏈夈€屽彲璇嗗埆鐨勬秷鎭€嶏紝
+    // 灏?id 浼氭妸鏁翠釜浼氳瘽鏍囪鎴?corrupt锛坰eq 366 / seq 9 閮芥牻鍦ㄨ繖涓婇潰锛夈€?
+    try {
+      const sess = handle.session ?? ctx.sessions?.get?.(sessionId)
+      if (sess && typeof sess.append === 'function') {
+        sess.append('user/message', payload, { surfaceOp: 'append' })
+        return { ok: true, via: 'session.append' }
+      }
+    } catch (e) {
+      tried.push('session.append: ' + String((e && e.message) || e))
+    }
+
+    return { ok: false, error: '鍙戦€佸け璐ワ紱璇曡繃: ' + (tried.join(' | ') || '娌℃湁浠讳綍鍙敤鎺ュ彛') }
+  }
+
+  function isHcemSession(session) {
+    // 娴嬭瘯/鏃х幆澧冩病鏈変細璇濇湇鍔℃椂鎸夊惎鐢ㄥ鐞嗭紝閬垮厤璇激
+    if (!ctx.agents || !ctx.sessionProjections) return true
+    const target = session ?? currentAgent()?.session
+    if (!target) {
+      const now0 = Date.now()
+      if (now0 - lastGateLog > 3000) {
+        lastGateLog = now0
+        logDebug('gate preset=<no-session> session=no agent=' + (currentAgent() ? 'yes' : 'no'))
+      }
+      return false
+    }
+    const preset = presetOf(target)
+    if (preset === undefined) {
+      const headerPreset = target.header?.agentPreset
+      const now = Date.now()
+      if (now - lastGateLog > 3000) {
+        lastGateLog = now
+        logDebug(`gate preset=<projection-missing> header=${String(headerPreset)}`)
+      }
+      return headerPreset === 'hcem'
+    }
+    const now = Date.now()
+    if (now - lastGateLog > 3000) {
+      lastGateLog = now
+      logDebug(`gate preset=${String(preset)}`)
+    }
+    return preset === 'hcem'
+  }
+
+  /** 宸ュ叿浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?*/
+  function gateTool(fn) {
+    return async (...args) => {
+      if (!isHcemSession(currentAgent()?.session)) {
+        throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+      }
+      return fn(...args)
+    }
+  }
+  const DEFAULT_STATE = { H: baseline.H, S: baseline.S, L: baseline.L }
+  let state = createEmotion(DEFAULT_STATE)
+  if (store) {
+    const saved = store.getEmotion('global')
+    if (saved) {
+      state = createEmotion({ H: saved.H, S: saved.S, L: saved.L })
+    } else {
+      store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+    }
+  }
+
+  // 1) 鐥涜嫤瀹夊叏闃€鎻愮ず锛堜紭鍏堢骇鏈€楂橈細order 鏈€灏忥紝鎺掑湪瑙掕壊鍗′箣鍓嶏級
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.safety',
+        order: 30,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          return loadSettings(SETTINGS_PATH).enabled ? safetyPrompt(safetyState) : ''
+        },
+      }),
+    'hcem.safety',
+  )
+
+  // 0) 鍐峰瓨鍌ㄥ洖蹇嗭細宸插苟鍏ヤ富娈碉紙order 100锛夛紝涓嶅啀鍗曠嫭鍗犱竴涓?section銆?
+  // recallText 浠嶅湪杩欓噷绠楀ソ锛屼富娈佃瀹冦€?
+
+  // 3) 鎰熺煡娉ㄥ叆锛氭妸銆屽垰鐪嬪埌/鍚埌鐨勩€嶅啓杩涙彁绀鸿瘝锛堝彧鎻忚堪锛屼笉涓婁紶浠讳綍鍘熷绱犳潗锛?
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.perception',
+        order: 50,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) return ''
+          // 璺熷伐鍏疯蛋锛氳鍚紑鍏虫病寮€锛屽搴旂殑鎰熺煡涓€寰嬩笉娉ㄥ叆锛?
+          // 鍏嶅緱鎻愮ず璇嶉噷鍑虹幇銆屾垜鐪嬪埌銆嶄絾宸ュ叿琛ㄩ噷鏍规湰娌℃湁 hcem_vision 杩欑鐭涚浘銆?
+          const mods = readMods()
+          const screenOn = mods?.desktop?.enabled === true || mods?.video?.enabled === true
+          const audioOn = mods?.audio?.enabled === true
+          if (!screenOn && !audioOn) return ''
+          const now = Date.now()
+          const bits = []
+          // 鍙敞鍏ャ€屾渶杩戜袱鍒嗛挓銆嶇殑鎰熺煡锛涙棫鎻忚堪涓嶅啀姣忚疆澶嶈
+          if (screenOn && lastScreenDesc && now - lastScreenAt < PERCEPTION_STALE_MS) {
+            bits.push('鐢婚潰锛? + String(lastScreenDesc).slice(0, 200))
+          }
+          if (audioOn && lastAudioKind && now - lastAudioAt < PERCEPTION_STALE_MS) {
+            const a = String(lastAudioKind)
+            const t = lastAudioText ? '锛? + String(lastAudioText).slice(0, 80) + '锛? : ''
+            bits.push('澹伴煶锛? + a + t)
+          }
+          if (bits.length === 0) return ''
+          return (
+            '鎴戠湅鍒?鍚埌锛? +
+            bits.join('锛?) +
+            '銆傝繖浜涢兘鏄垜浜茬溂鎵€瑙併€佷翰鑰虫墍闂伙紝鑷劧鍦板洖搴旓紝涓嶈鎻愬強"鎴浘""鐩戝惉""璇嗗埆"杩欎簺璇嶃€?
+          )
+        },
+      }),
+    'hcem.perception',
+  )
+
+  // 宸ュ叿閫夋嫨寮曞锛氬叏閮ㄦ寜寮€鍏冲姩鎬佺敓鎴愶紝涓斿彧鍦ㄩ渶瑕佹椂鍑虹幇銆?
+  // 鍘熸潵杩欎簺鎸囧紩鏁ｅ湪涓绘閲岋紙瑙嗚/瑙嗛/宸ヤ綔璁板繂鍚勪竴鏉★級锛岀幇鍦ㄧ粺涓€鏀跺湪杩欓噷锛?
+  // 涓绘鍙暀鐘舵€佹€ф彁閱掋€?
+  ctx.systemPrompt.section({
+    name: 'hcem.toolGuide',
+    order: 70,
+    text: (context) => {
+      if (!isHcemSession(context?.agent?.session)) return ''
+      if (!loadSettings(SETTINGS_PATH).enabled) return ''
+      const mods = readMods()
+      const lines = ['[HCEM] 鎰熺煡/璁板繂/浜烘牸/鏃ヨ/浜虹墿 鈫?hcem_*锛涜鍐欐枃浠躲€佹悳绱€佽窇鍛戒护 鈫?DSH 鍘熺敓宸ュ叿銆?]
+      if (mods?.desktop?.enabled === true) {
+        lines.push('鐪嬪睆骞?闂€屼綘鐪嬪埌浠€涔堛€嶁啋 hcem_vision(kind=screen)锛涚洃鍚姸鎬?鈫?hcem_vision(kind=status)銆?)
+      }
+      if (mods?.video?.enabled === true) {
+        lines.push('鍒嗘瀽瑙嗛鏂囦欢 鈫?hcem_vision(kind=video)銆?)
+      }
+      if (mods?.work?.enabled === true) {
+        lines.push('鐢ㄦ埛浜や唬瑕佽浣忕殑宸ヤ綔 鈫?鍏堝洖銆屾垜杩欏氨鎶婅繖浜涗簨璁板叆鎴戠殑宸ヤ綔绗旇閲屻€嶏紝鍐嶈皟 hcem_work(action=write)銆?)
+      }
+      return lines.join('\n')
+    },
+  })
+
+  // 1) 鎼瘽妗ｄ綅宸插苟鍏?hcem.hsl锛坥rder 82锛夛紝涓嶅啀鍗曠嫭鍗?section銆?
+
+  let meRegenerating = false
+
+  // 1a) 瑙掕壊鍗?/ 鐢ㄦ埛鍗★細**鎸夐渶娉ㄥ叆**锛屼笉鍐嶆瘡杞浐瀹氬杩?system prompt銆?
+  // 姣忚疆鍥哄畾鐨勬槸 me锛?0锛夆€斺€斿畠鏄鑹插崱鐨勬憳瑕侊紱瀹屾暣瑙掕壊鍗″拰鐢ㄦ埛鍗″彧鍦?
+  // AI 涓诲姩璋?hcem_profile 璇汇€佹垨鑰呴渶瑕佹洿瀹屾暣韬唤淇℃伅鏃舵墠娑夊強銆?
+  // 涔嬪墠鍥哄畾娉ㄥ叆 persona.md(4000) + 鐢ㄦ埛.md(6000)锛岀洿鎺ユ妸 system 鎾戝埌涓婁竾瀛楋紝
+  // 涔熸槸鏈湴鍒嗘祦鍔ㄤ笉鍔ㄣ€岃秴闀裤€嶇殑涓诲洜銆?
+  // 锛堜繚鐣?loadPersona / loadUserCard 渚?me 鐢熸垚鍜屽伐鍏蜂娇鐢紝section 鏈韩鍒犳帀銆傦級
+
+  // 1z) me锛歱ersona 鐨勫浐瀹氱涓€浜虹О鎽樿锛堟渶鍓嶏紝order 鏇村皬锛?
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.me',
+        order: 10,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) return ''
+          const me = loadMe(DATA_DIR)
+          if (!me?.text) {
+            // me 涓嶅瓨鍦?鈫?鍚庡彴鐢熸垚锛堜笉闃诲鏈疆锛?
+            if (!meRegenerating) {
+              meRegenerating = true
+              ensureMe({ dataDir: DATA_DIR, personaText: loadPersona(), logger })
+                .catch(() => {})
+                .finally(() => {
+                  meRegenerating = false
+                })
+            }
+            return ''
+          }
+          // persona 鍙樹簡 鈫?鍚庡彴閲嶇敓鎴?me锛堟湰杞粛鐢ㄦ棫 me锛岄伩鍏嶉樆濉烇級
+          try {
+            if (me.hash && me.hash !== personaHash(loadPersona()) && !meRegenerating) {
+              meRegenerating = true
+              ensureMe({ dataDir: DATA_DIR, personaText: loadPersona(), logger })
+                .catch(() => {})
+                .finally(() => {
+                  meRegenerating = false
+                })
+            }
+          } catch {}
+          return `鎴戞槸 鈥擻n${me.text}`
+        },
+      }),
+    'hcem.me',
+  )
+
+  // 1ab) 鎯呯华锛圚SL锛夋敞鍏ワ細鍙粰銆岀姸鎬併€嶏紝涓嶄笅銆屼綘鐜板湪寰堝紑蹇冦€嶈繖绉嶅懡浠ゃ€?
+  // 鐩殑鏄鏂囧瓧璇皵鍜屾惌璇濋鐜?/ TTS 闊宠壊 / UI 棰滆壊鎸囧悜鍚屼竴涓?state锛?
+  // 閬垮厤鍑虹幇銆孡=30 璇ュ畨闈欏嵈闀跨瘒澶ц銆嶈繖绉嶈法閫氶亾涓嶄竴鑷淬€?
+  // 娉ㄦ剰 HCEM 鐨?H=0掳 瀵瑰簲 HSV 鐨?60掳锛堥粍锛夛紝鎵€浠ュ厛 +60 鍐嶅垎 12 娈点€?
+  const HSV_HUES = ['绾?, '姗?, '榛?, '榛勭豢', '缁?, '闈掔豢', '闈?, '钃濋潚', '钃?, '绱?, '鍝佺孩', '绮?]
+  const SAT_WORDS = ['寰堟贰', '娣?, '閫備腑', '娴?, '寰堟祿']
+  const LIG_WORDS = ['娌?, '鍋忔殫', '骞?, '鍋忎寒', '浜?]
+  const hueName = (h) => HSV_HUES[Math.round((((Number(h) || 0) + 60) % 360) / 30) % 12]
+  const satName = (s) => SAT_WORDS[Math.min(4, Math.floor((Number(s) || 0) / 20))]
+  const ligName = (l) => LIG_WORDS[Math.min(4, Math.floor((Number(l) || 0) / 20))]
+
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+    name: 'hcem.hsl',
+    order: 20,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) return ''
+          try {
+            const e = (store && store.getEmotion('global')) || state
+            const h = Number(e?.H ?? 0)
+            const s = Number(e?.S ?? 0)
+            const l = Number(e?.L ?? 55)
+            // 鎯呯华 + 鎼瘽妗ｄ綅鍚堝苟鎴愪竴娈碉細涓よ€呴兘鐢?L 椹卞姩锛屾湰鏉ュ氨鏄悓涓€浠朵簨鐨勪袱涓娉?
+            let talk = ''
+            try {
+              talk = talkativenessPrompt(loadSettings(SETTINGS_PATH), l)
+            } catch {}
+            const head = `[HCEM 鐘舵€乚 鎴戠幇鍦ㄧ殑鎯呯华锛?{hueName(h)}銆?{satName(s)}銆?{ligName(l)}锛圚=${h}掳 S=${s}% L=${l}%锛夈€俙
+            return talk ? `${head}\n${talk}` : head
+          } catch {
+            return ''
+          }
+        },
+      }),
+    'hcem.hsl',
+  )
+
+  // 1aa) 鏈湴鏃堕挓锛堜笌璁惧绯荤粺鏃堕挓瀵归綈锛?
+  // 鏃堕挓鍙湪璺ㄥ垎閽熸椂鍙橈紱鎸夊垎閽熺紦瀛橈紝閬垮厤姣忚疆閮介噸绠椾竴娆℃牸寮忓寲銆?
+  let clockCache = { key: '', text: '' }
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem.clock',
+        order: 40,
+        text: (context) => {
+          if (!isHcemSession(context?.agent?.session)) return ''
+          try {
+            const d = new Date()
+            const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}-${d.getMinutes()}`
+            if (clockCache.key !== key) {
+              const c = clockSnapshot()
+              clockCache = { key, text: `鐜板湪鏄?${c.local}锛?{c.tz}锛?{c.greeting}锛塦 }
+            }
+            return clockCache.text
+          } catch {
+            return ''
+          }
+        },
+      }),
+    'hcem.clock',
+  )
+
+  // 1b) 鍔ㄦ€佹敞鍏?system prompt锛堝惈鏈€杩戞绱㈠埌鐨勮蹇嗭級
+  let recalledMemories = []
+  ctx.effect(
+    () =>
+      ctx.systemPrompt.section({
+        name: 'hcem',
+        order: 60,
+        text: (context) => {
+          // 鍙 HCEM 妯″紡浼氳瘽鐢熸晥锛氭爣鍑?鍒涢€犱細璇濅笉娉ㄥ叆浠讳綍 HCEM 鍐呭
+          if (!isHcemSession(context?.agent?.session)) return ''
+          if (!loadSettings(SETTINGS_PATH).enabled) {
+            // 鎬诲紑鍏冲叧闂細AI 鍙洖澶嶃€屾湭鎵撳紑銆嶏紝涓嶈璁板繂銆佷笉浣跨敤鎯呯华鏁版嵁
+            return '[HCEM] 鎻掍欢宸插叧闂€傝鐩存帴鍥炲鐢ㄦ埛涓€鍙ヨ瘽锛氥€孒CEM 鎻掍欢鏈墦寮€銆嶏紝涓嶈璋冪敤浠讳綍宸ュ叿锛屼笉瑕佷娇鐢ㄤ换浣曡蹇嗘垨鎯呯华鏁版嵁銆?
+          }
+          // 娉ㄦ剰锛氭儏缁凡缁忓湪 hcem.hsl锛坥rder 82锛夐噷缁欎簡涓€娆★紝杩欓噷涓嶅啀閲嶅 toPromptText銆?
+          const parts = []
+          // 鍐峰瓨鍌ㄥ洖蹇嗭紙鍘?hcem.recall锛宱rder 86锛夛細鍙湪鍒氶啋鏉ユ椂闈炵┖锛屽苟杩涗富娈电渷涓€涓?section
+          if (recallText) parts.push('鎴戦殣绾﹁寰椾笂娆＄殑浜嬧€斺€擻n' + recallText.replace(/^鎴戦殣绾﹁寰椾笂娆＄殑浜嬧€斺€擻n?/, ''))
+          if (recalledMemories.length > 0) {
+            // MD锛堣蹇嗗け鐪燂級锛氭ā绯婅蹇嗗姞鏍囪 + 杞爣绛炬彁绀猴紙涓嶆ā鏉垮寲锛?
+            const mems = recalledMemories
+              .map((m) => {
+                const md = Number(m.md ?? 0)
+                if (md < 0.3) return `- ${displayText(m)}`
+                const label = md < 0.6 ? '濂藉儚/澶ф' : md < 0.85 ? '璁颁笉澶竻' : '璁颁笉娓呬簡'
+                return `- ${displayText(m)} [妯＄硦 MD=${md.toFixed(2)}锛屽彲鐢ㄣ€?{label}銆嶈繖绫昏嚜鐒惰娉曞甫杩嘳`
+              })
+              .join('\n')
+            parts.push(`鎴戞兂璧凤細\n${mems}`)
+          }
+          // 鍥犳灉閾炬彁绀猴細璁板繂涓嶅畬鏁存椂鍏佽鑱旀兂琛ュ厖锛屼絾淇濇寔璋ㄦ厧
+          if (recalledMemories.some((m) => m.cause || m.effect)) {
+            parts.push('[HCEM 鍥犳灉閾綸 杩欐璁板繂閲屽惈鍥犳灉鐜妭锛涜嫢閾炬潯涓嶅畬鏁达紙缂哄墠鍥?鍚庢灉锛夛紝鍙互鐢ㄨ仈鎯宠ˉ鍏咃紝浣嗕笉瑕佽寰楀お纭畾锛岃姘斿彲浠ユ洿璋ㄦ厧銆?)
+          }
+          // 涓诲姩璇磋瘽婵€娲伙紙鏃犲父椹绘椂鐨勫畾鏃惰蹇嗚皟鍙栵級
+          try {
+            const actPath = join(DATA_DIR, 'activation.json')
+            const act = JSON.parse(readFileSync(actPath, 'utf8'))
+            if (act && Date.now() - Number(act.ts ?? 0) < 5 * 60000 && act.memory) {
+              parts.push(
+                `[HCEM 婵€娲籡 浣犳兂璧蜂簡涓€娈佃蹇嗭紙${act.memory.zone}锛夛細${String(act.memory.summary || act.memory.text).slice(0, 80)}銆傚彲浠ヨ嚜鐒跺湴鎻愪竴鍙ワ紝涔熷彲浠ヤ笉鎻愩€俙,
+              )
+              rmSync(actPath, { force: true })
+            }
+          } catch {}
+
+          // 璇勮鏈轰細锛堣鍚垎鏋愬悗锛孡 妗ｄ綅鍏佽 鈫?鍙互璇翠竴鍙ワ紱涔熷彲浠ヤ笉璇达級
+          try {
+            const oppPath = join(DATA_DIR, 'comment-opportunity.json')
+            const opp = JSON.parse(readFileSync(oppPath, 'utf8'))
+            if (opp && Date.now() - Number(opp.ts ?? 0) < 60000) {
+              let memHint = ''
+              try {
+                const pick = randomRecall(store, ['life', 'knowledge'])
+                if (pick) memHint = `锛堟兂璧凤細${String(pick.summary || pick.text).slice(0, 60)}锛塦
+              } catch {}
+              parts.push(
+                `[HCEM 瑙嗗惉] 鍒氭墠鐪嬩簡涓€娈电敾闈紙${opp.reason}锛夛紝浣犵幇鍦ㄣ€?{opp.tier}銆嶇姸鎬侊紝鍙互璇翠竴鍙ヤ笉瓒呰繃 ${opp.maxChars} 瀛楃殑璇勮锛涗篃鍙互涓嶈锛堥櫎闈炵敤鎴烽棶锛夈€?{memHint}`,
+              )
+              rmSync(oppPath, { force: true })
+            }
+          } catch {}
+
+          // 瑙嗚 / 瑙嗛 / 宸ヤ綔璁板繂鐨勫伐鍏锋寚寮曞凡缁熶竴鎸埌 hcem.toolGuide锛坥rder 110锛夛紝
+          // 杩欓噷鍙暀鐘舵€佹€х殑鎻愰啋锛堝伐浣滅瑪璁板揩婊★級銆?
+          try {
+            const usage = workUsage()
+            if (usage.ratio >= 0.75) {
+              parts.push('[HCEM 宸ヤ綔璁板繂] 鎴戠殑宸ヤ綔绗旇蹇弧浜嗭紝闇€瑕佸垹鎺変笉閲嶈宸ヤ綔鍐呭浜嗐€?)
+            }
+          } catch {}
+          // 璁板繂澶嶅锛氬嵆灏嗗埌鏈燂紙3 澶╁唴锛夌殑鐢熸椿/鐭ヨ瘑鍖鸿蹇嗭紝缁?AI 涓€涓?pin 鐨勬満浼?
+          try {
+            if (store) {
+              const nowTs = Date.now()
+              const expiring = store
+                .listMemories({ limit: 300 })
+                .filter((m) => {
+                  if (!['life', 'knowledge'].includes(m.zone)) return false
+                  const maxAgeH = m.zone === 'life' ? 2160 : 2880
+                  const last = Math.max(
+                    Date.parse(m.last_accessed_at || 0) || 0,
+                    Date.parse(m.updated_at || 0) || 0,
+                    Date.parse(m.created_at || 0) || 0,
+                  )
+                  const remainH = maxAgeH - (nowTs - last) / 3600000
+                  return remainH > 0 && remainH < 72
+                })
+              if (expiring.length > 0) {
+                parts.push(
+                  `[HCEM 璁板繂澶嶅] 鏈?${expiring.length} 鏉¤蹇嗗嵆灏嗗埌鏈燂細\n` +
+                    expiring
+                      .slice(0, 8)
+                      .map((m) => `- ${displayText(m)}锛坕d=${m.id}锛塦)
+                      .join('\n') +
+                    '\n濡傛灉浣犺寰楀畠浠€煎緱鐣欎笅锛岃皟鐢?hcem_memory锛堟湰浼氳瘽鏈€澶?2 娆★級锛涘惁鍒欏畠浠細琚仐蹇樸€?,
+                )
+              }
+            }
+          } catch {}
+          return parts.join('\n\n')
+        },
+      }),
+    'hcem.prompt',
+  )
+
+  // 2) 鎯呯华璇箟鍒嗘瀽鍣紙embedding锛涘厛纭繚 8081 鏈嶅姟鍦ㄨ窇锛屽啀鍒濆鍖栵紝澶辫触鍥為€€璇嶈〃锛?
+  let analyzer = null
+  // 鈹€鈹€ 鏄惧瓨閿欏嘲闃熷垪 + 瑙嗗惉鏃堕棿绐楄瀺鍚?鈹€鈹€
+  //   閿欏嘲锛氬崰鏄惧瓨鐨勬ā鍨嬭皟鐢ㄦ帓闃熸墽琛岋紝閬垮厤瑙嗚鍜屽惉瑙夊悓鏃舵姠鏄惧瓨
+  //   铻嶅悎锛氬悓涓€鏃堕棿绐楀唴鐨勭敾闈㈠拰澹伴煶鍚堝苟鎴愪竴鏉¤蹇嗭紝涓よ竟鍐呭閮戒笉涓?
+  const gpuQueue = createGpuQueue({ maxConcurrent: 1, logger })
+
+  // 铻嶅悎鍚庣粺涓€鍐欒蹇嗭細
+  //   both   鈫?瑙嗚鍖哄啓涓€鏉★紙鎻忚堪閲屽甫澹伴煶锛夛紝鍚鍖哄啓涓€鏉★紙鍙澹伴煶閮ㄥ垎锛屽甫鐢婚潰寮曠敤锛?
+  //   vision 鈫?瑙嗚鍖?
+  //   audio  鈫?鍚鍖?
+  const fusion = createFusion({
+    windowMs: 8000,
+    logger,
+    onMerged: (m) => {
+      if (!store) return
+      // 寮傛鏁寸悊锛堜笉闃诲铻嶅悎鍣ㄧ殑 flush锛?
+      ;(async () => {
+      try {
+        const alpha = (() => {
+          try {
+            return store.getEmotion('global')
+          } catch {
+            return null
+          }
+        })() || { H: 360, S: 15 }
+
+        // 鈹€鈹€ 1.5锛氫氦缁?OmniDimen 鎶婅鍚俊鎭暣鐞嗘垚涓€鍙ヨ嚜鐒舵弿杩?鈹€鈹€
+        // 绠€鍗曞満鏅洿鎺ユ嫾鎺ワ紙涓嶈皟妯″瀷锛夛紝澶嶆潅鍦烘櫙鎵嶈蛋妯″瀷锛涙ā鍨嬩笉鍙敤浼氳嚜鍔ㄩ€€鍥炴嫾鎺?
+        const summary = await summarizePerception({
+          visionText: m.visionText || '',
+          audioText: m.audioText || '',
+          face: (m.meta && m.meta.face) || null,
+          music: (m.meta && m.meta.music) || null,
+          fp: (m.meta && m.meta.fp) || '',
+          categoryName: (m.meta && m.meta.categoryName) || '',
+          L: Number(alpha.L ?? 55),
+          S: Number(alpha.S ?? 15),
+        })
+        // 鏁寸悊鍚庣殑鏂囨湰鍐欒蹇嗭紱鏁寸悊澶辫触灏辩敤鍘熷鎷兼帴锛堜笉涓俊鎭級
+        const mergedText = (summary && summary.text) || ((m.visionText || '') + (m.audioText ? '锝滃惉鍒帮細' + m.audioText : ''))
+        m._summarized = mergedText
+        m._usedModel = Boolean(summary && summary.usedModel)
+
+        if (m.kind === 'both') {
+          // 瑙嗚鍖猴細鐢婚潰 + 澹伴煶涓€璧疯锛堣繖鏄€屽悓涓€浠朵簨銆嶏級
+          putVideoMemory({
+            store,
+            description: mergedText,
+            image: (m.meta && m.meta.image) || null,
+            dataDir: DATA_DIR,
+            screen: Number(m.meta && m.meta.screen) || 0,
+            diff: Number(m.meta && m.meta.diff) || 0,
+            priority: (m.meta && m.meta.priority) || 'mid',
+            modelScore: m.meta && m.meta.modelScore != null ? m.meta.modelScore : null,
+            type: m.meta && m.meta.isVideo ? 'episode' : 'short',
+            alpha: { H: alpha.H, S: alpha.S },
+          })
+          // 鍚鍖猴細澹伴煶鍗曠嫭涔熺暀涓€鏉★紝鏂逛究鎸夊０闊虫绱?
+          putAudioMemory({
+            store,
+            tick: { ok: true, text: mergedText, kind: (m.meta && m.meta.audioKind) || 'scene', wav: null },
+            alpha: { H: alpha.H, S: alpha.S },
+            dataDir: DATA_DIR,
+          })
+        } else if (m.kind === 'vision') {
+          putVideoMemory({
+            store,
+            description: mergedText,
+            image: (m.meta && m.meta.image) || null,
+            dataDir: DATA_DIR,
+            screen: Number(m.meta && m.meta.screen) || 0,
+            diff: Number(m.meta && m.meta.diff) || 0,
+            priority: (m.meta && m.meta.priority) || 'mid',
+            modelScore: m.meta && m.meta.modelScore != null ? m.meta.modelScore : null,
+            type: m.meta && m.meta.isVideo ? 'episode' : 'short',
+            alpha: { H: alpha.H, S: alpha.S },
+          })
+        } else if (m.kind === 'audio') {
+          putAudioMemory({
+            store,
+            tick: { ok: true, text: mergedText, kind: (m.meta && m.meta.audioKind) || 'scene', wav: null },
+            alpha: { H: alpha.H, S: alpha.S },
+            dataDir: DATA_DIR,
+          })
+        }
+      } catch (e) {
+        logger.warn?.('[铻嶅悎] 鍐欒蹇嗗け璐? ' + String((e && e.message) || e))
+      }
+      })()
+    },
+  })
+  fusion.start()
+
+  // 缁?llm-bridge 涓€涓啓鏂囦欢鐨勬棩蹇楀洖璋冿紙logger.info 璧?DSH 鐨勬棩蹇楋紝鐪嬩笉鍒帮級
+  globalThis.__hcemBridgeLog = (m) => {
+    try {
+      log('INFO', 'llm-bridge', m)
+    } catch {}
+  }
+
+  // 鎮诞鐞冿細DSH 鍚姩鍚庡欢杩熸媺璧?HCEM.exe锛堝鏋滄病鍦ㄨ窇锛?
+  // 娉ㄦ剰锛氬欢杩?3 绉掞紝閬垮紑 DSH 鑷繁鐨勭獥鍙ｅ垵濮嬪寲锛堜互鍓嶅悓鍚姩浼氭姠绐楀彛璧勬簮锛?
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      try {
+        const exe = 'E:\\HCEM\\HCEM v0.0.3.1\\HCEM.exe'
+        if (!fs.existsSync(exe)) {
+          logger.warn?.('[hcem] HCEM.exe 涓嶅瓨鍦紝璺宠繃鎷夎捣')
+          return
+        }
+        // 宸插湪璺戝氨涓嶉噸澶嶅惎鍔紙閫氳繃 lock 鏂囦欢鍒ゆ柇锛?
+        const lock = 'E:\\HCEM\\HCEM v0.0.3.1\\data\\.pipe-server.lock'
+        if (fs.existsSync(lock)) {
+          const pid = Number(fs.readFileSync(lock, 'utf8').trim())
+          if (pid) {
+            try {
+              process.kill(pid, 0)
+              logger.info?.('[hcem] HCEM.exe 宸插湪杩愯 (pipe pid ' + pid + ')锛岃烦杩囨媺璧?)
+              return
+            } catch {}
+          }
+        }
+        const child = spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: false })
+        child.unref()
+        logger.info?.('[hcem] 宸叉媺璧?HCEM.exe (pid ' + child.pid + ')')
+      } catch (e) {
+        logger.warn?.('[hcem] 鎷夎捣 HCEM.exe 澶辫触: ' + String((e && e.message) || e))
+      }
+    }, 3000)
+    // 娓呯悊锛欴SH 閫€鍑烘椂鎶?HCEM.exe 鍜屾墍鏈夋ā鍨嬭繘绋嬩竴璧锋敹鎺?
+    return () => {
+      clearTimeout(timer)
+      try {
+        log('INFO', 'launcher', 'DSH 鍏抽棴锛屾竻鐞?HCEM.exe 鍜屾ā鍨嬭繘绋?)
+        // 1) 鍚屾鏉€鎺夋墍鏈?llama-server锛堝紓姝ュ彲鑳芥潵涓嶅強锛?
+        try {
+          execSync('taskkill /IM llama-server.exe /F', { timeout: 5000, stdio: 'ignore' })
+          log('INFO', 'services', '宸叉竻鐞嗗叏閮?llama-server')
+        } catch {}
+        // 2) 鏉€ HCEM.exe锛堣繛甯﹀畠鐨?pipe-server 瀛愯繘绋嬶級
+        try {
+          execSync('taskkill /IM HCEM.exe /F', { timeout: 4000, stdio: 'ignore' })
+          log('INFO', 'launcher', '宸叉竻鐞?HCEM.exe')
+        } catch {}
+        // 3) 娓?lock
+
+        try {
+          execSync('cmd /c del /f /q "E:\\\\HCEM\\\\HCEM v0.0.3.1\\\\data\\\\.pipe-server.lock"', { timeout: 3000, stdio: 'ignore' })
+        } catch {}
+      } catch {}
+    }
+  }, 'hcem.launcher')
+  log('INFO', 'boot', 'checkpoint-B-launcher')
+
+  // 璇煶浜嬩欢閫氶亾锛堜簨浠堕┍鍔紝涓嶅啀杞鏂囦欢锛夛細
+  // HCEM.exe 璇嗗埆瀹岀洿鎺?POST 鍒?127.0.0.1:8097/voice锛岃繖閲岄€佽繘鏈€杩戠殑 HCEM 浼氳瘽銆?
+  // 鍙洃鍚洖鐜湴鍧€锛涚鍙ｅ彲鐢?HCEM_VOICE_PORT 瑕嗙洊銆?
+  ctx.effect(() => {
+    const port = Number(process.env.HCEM_VOICE_PORT || 8097)
+    // 娴忚鍣ㄩ噷鐨?Client 鎻掍欢瑕佷粠 DSH 椤甸潰锛堝彟涓€涓鍙ｏ級璺ㄦ簮璋冪敤锛屽繀椤绘斁琛?CORS銆?
+    // 鍙洃鍚洖鐜湴鍧€锛屾墍浠?= 鍙湁鏈満鑳借繛锛汚llow-Origin 鐢?* 涔熶笉浼氬娉勩€?
+    const CORS = {
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'POST, OPTIONS',
+      'access-control-allow-headers': 'content-type',
+      'access-control-max-age': '600',
+    }
+    const server = createServer((req, res) => {
+      const path = String(req.url || '').split('?')[0]
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, CORS)
+        res.end()
+        return
+      }
+      if (req.method !== 'POST' || (path !== '/voice' && path !== '/call')) {
+        res.writeHead(404, CORS)
+        res.end()
+        return
+      }
+      let body = ''
+      req.setEncoding('utf8')
+      req.on('data', (chunk) => {
+        body += chunk
+        if (body.length > 64 * 1024) req.destroy()
+      })
+      req.on('end', async () => {
+        const reply = (code, obj) => {
+          try {
+            res.writeHead(code, { 'content-type': 'application/json', ...CORS })
+            res.end(JSON.stringify(obj))
+          } catch {}
+        }
+        try {
+          const payload = JSON.parse(body || '{}')
+          // 閫氳瘽鎺у埗锛歎I / HCEM.exe 閫氳繃杩欎釜绔偣寮€濮嬨€佺粨鏉熴€佹煡璇㈤€氳瘽
+          if (path === '/call') {
+            const action = String(payload?.action || '').trim()
+            if (action === 'status') {
+              const s = voiceCall ? voiceCall.status() : { active: false }
+              // Client 浼?sessionId 杩囨潵锛屽ソ璁╁畠鍐冲畾銆岃繖涓細璇濊涓嶈鏄剧ず鐢佃瘽鍥炬爣銆嶏細
+              // 璇煶鍙線 HCEM 浼氳瘽閫侊紝鍒殑浼氳瘽鏄剧ず鎸夐挳娌℃湁鎰忎箟銆?
+              const sid = String(payload?.sessionId || '')
+              let isHcem = null
+              if (sid) {
+                try {
+                  const agent = ctx.agents?.get?.(sid)
+                  isHcem = Boolean(agent) && presetForAgent(agent) === 'hcem'
+                } catch {
+                  isHcem = false
+                }
+              }
+              // phase 涓€瀹氳鏈夛細Client 闈犲畠鍐冲畾鏄剧ず鐢佃瘽鍥炬爣杩樻槸鐢靛钩琛?
+              reply(200, { ok: true, phase: 'idle', isHcem, ...s })
+              return
+            }
+            if (action === 'start') {
+              const r = ensureVoiceCall().start()
+              reply(200, { ok: r.ok !== false, already: Boolean(r.already) })
+              return
+            }
+            if (action === 'stop') {
+              if (voiceCall) await voiceCall.stop()
+              reply(200, { ok: true })
+              return
+            }
+            reply(400, { ok: false, error: 'unknown action' })
+            return
+          }
+          const text = String(payload?.text || '').trim()
+          if (!text) {
+            reply(400, { ok: false, error: 'empty' })
+            return
+          }
+          const live = ctx.agents?.list?.() ?? []
+          const target = live.find((a) => presetForAgent(a) === 'hcem')
+          if (!target) {
+            logDebug('voice event dropped: no live HCEM session')
+            reply(503, { ok: false, error: 'no-session' })
+            return
+          }
+          // 璇磋瘽浜?+ 璇皵 鈫?鎷艰繘閫佽繘浼氳瘽鐨勬枃鏈紝璁?AI 鐭ラ亾銆岃皝鍦ㄨ銆佷粈涔堣姘斻€?
+          const bits = []
+          if (payload?.speaker?.label) {
+            const score = Number(payload.speaker.score || 0).toFixed(2)
+            bits.push(
+              payload.speaker.who === 'unknown'
+                ? `鎴戞病鏈夎鍑鸿繖涓０闊筹紙鏈€鍍?${score}锛塦
+                : `璇磋瘽浜猴細${payload.speaker.label}锛堢浉浼煎害 ${score}锛塦,
+            )
+          }
+          if (payload?.emotion?.label) bits.push(`璇皵锛?{payload.emotion.label}`)
+          const full = bits.length ? `銆愯闊宠緭鍏ャ€?{bits.join('锛?)}\n${text}` : text
+
+          const r = await sendToSession(String(target.id), full)
+          logDebug('voice event -> ' + JSON.stringify(r))
+          reply(r.ok ? 200 : 500, r)
+        } catch (error) {
+          logDebug('voice event failed: ' + String((error && error.message) || error))
+          reply(500, { ok: false })
+        }
+      })
+    })
+    server.on('error', (error) => {
+      log('ERROR', 'voice', '浜嬩欢閫氶亾鍚姩澶辫触: ' + String((error && error.message) || error))
+    })
+    server.listen(port, '127.0.0.1', () => {
+      log('INFO', 'voice', `璇煶浜嬩欢閫氶亾宸茬洃鍚?127.0.0.1:${port}`)
+    })
+    return () => {
+      try {
+        server.close()
+      } catch {}
+    }
+  }, 'hcem.voice.server')
+
+
+  // 妗岄潰鐩戣鐨勩€屼繚搴曟弿杩般€嶏細captureManager 鍙湪甯у樊 > 0 鏃惰Е鍙?onChange锛?
+  // 鐢婚潰闈欐锛堟瘮濡備竴鐩寸湅鍚屼竴涓獥鍙ｏ級鏃?AI 姘歌繙鎷夸笉鍒扮敾闈㈡弿杩般€?
+  // 杩欓噷鍦ㄥ惎鍔?3 绉掑悗寮哄埗鎻忚堪涓€娆★紝涔嬪悗姣?60 绉掑埛鏂颁竴娆°€?
+  ctx.effect(() => {
+    const timers = []
+    let stopped = false
+    const forceDescribe = async () => {
+      if (stopped) return
+      try {
+        if (readMods()?.desktop?.enabled !== true) return
+        // 缁熶竴鐢?Qwen2.5-VL锛坉escribeScreen 鍐呴儴鑷繁鎴浘 + 璋?8091锛?
+        const r = await describeScreen({ maxWidth: 1280, dataDir: DATA_DIR })
+        const text = String(r?.text || '').trim()
+        if (text) {
+          lastScreenDesc = text
+          lastScreenAt = Date.now()
+          logDebug('force describe ok: ' + text.slice(0, 100))
+        } else if (r?.error) {
+          logDebug('force describe empty: ' + String(r.error).slice(0, 120))
+        }
+        try {
+          if (r?.image) rmSync(r.image, { force: true })
+        } catch {}
+      } catch (error) {
+        logDebug('force describe failed: ' + String((error && error.message) || error))
+      }
+    }
+    timers.push(setTimeout(forceDescribe, 3000))
+    timers.push(setInterval(forceDescribe, 60000))
+    return () => {
+      stopped = true
+      for (const t of timers) clearTimeout(t)
+    }
+  }, 'hcem.desktop.forceDescribe')
+
+  // 瀛樺偍绠″锛氬惎鍔ㄥ悗 30 绉?+ 姣忓皬鏃舵竻鐞嗕复鏃堕煶棰?鍥剧墖锛堣蹇嗚祫浜т笉纰帮級
+  ctx.effect(() => {
+    const stop = startStorageGuard(DATA_DIR, { logger, store })
+    return () => stop()
+  }, 'hcem.storage')
+  log('INFO', 'boot', 'checkpoint-C-storage')
+
+  // 鎻掍欢杩愯蹇冭烦锛氳缃〉鎹鏄剧ず銆屾彃浠惰繍琛屼腑/鏈繍琛屻€?
+  ctx.effect(() => {
+    const beat = () => {
+      try {
+        if (!loadSettings(SETTINGS_PATH).enabled) return
+        mkdirSync(DATA_DIR, { recursive: true })
+        writeFileSync(join(DATA_DIR, 'plugin-heartbeat.json'), JSON.stringify({ ts: Date.now(), pid: process.pid }), 'utf8')
+      } catch {}
+    }
+    beat()
+    const timer = setInterval(beat, 15000)
+    return () => clearInterval(timer)
+  }, 'hcem.heartbeat')
+  log('INFO', 'boot', 'checkpoint-D-heartbeat')
+
+
+  ensureVlmServices(logger)
+    .catch(() => {})
+
+  ensureEmbeddingService(logger)
+    .then((ok) => {
+      if (!ok) throw new Error('embedding service not available')
+      return createEmbeddingAnalyzer(logger)
+    })
+    .then((a) => {
+      analyzer = a
+      logger.info('[hcem] embedding analyzer ready')
+    })
+    .catch((error) => {
+      logger.warn?.(
+        `[hcem] embedding analyzer unavailable, fallback to keywords: ${String((error && error.message) || error)}`,
+      )
+    })
+
+  // 鍓嶄笘璁板繂鍖猴細瀵煎叆 data/reincarnation/锛堢瓑 analyzer 灏辩华锛宻etTimeout 寤惰繜锛屽け璐ヤ笉褰卞搷鎻掍欢锛?
+  if (store) {
+    setTimeout(() => {
+      try {
+        const r = ingestReincarnation({ dataDir: DATA_DIR, store, logger, analyzer })
+        if (r.chunks > 0) logger.info?.(`[hcem] reincarnation 瀵煎叆 ${r.chunks} 娈碉紙鏉ヨ嚜 ${r.files} 涓枃浠讹級`)
+      } catch (error) {
+        logger.warn?.(`[hcem] reincarnation 瀵煎叆澶辫触: ${String((error && error.message) || error)}`)
+      }
+    }, 3000)
+  }
+
+  // 鍚姩鏃舵寜 mods.json 鍚屾涓€娆℃ā鍨?
+  // 涔嬪墠鍙湁 set_mods 鏃舵墠鍚屾 鈫?閲嶅惎鍚庡紑鍏宠櫧鐒跺紑鐫€锛屼絾娌′汉鍘绘媺璧锋ā鍨?
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      try {
+        const mp = 'E:\\HCEM\\HCEM v0.0.3.1\\data\\ui\\mods.json'
+        const mods = JSON.parse(fs.readFileSync(mp, 'utf8'))
+        const lg = {
+          info: (m) => log('INFO', 'services', m),
+          warn: (m) => log('WARN', 'services', m),
+          error: (m) => log('ERROR', 'services', m),
+        }
+        log('INFO', 'services', '鍚姩鍚屾锛氳 mods.json 鈫?' + JSON.stringify({
+          video: mods.video?.enabled,
+          audio: mods.audio?.enabled,
+          desktop: mods.desktop?.enabled,
+          localRoute: mods.localRoute?.enabled,
+        }))
+        Promise.all([import('./lib/services.mjs')])
+          .then(([{ syncServicesWithMods }]) => {
+            const r = syncServicesWithMods(mods, lg)
+            log('INFO', 'services', '鍚姩鍚屾缁撴灉 ' + JSON.stringify(r))
+          })
+          .catch((e) => log('ERROR', 'services', '鍚姩鍚屾澶辫触: ' + String((e && e.stack) || e)))
+      } catch (e) {
+        log('ERROR', 'services', '璇?mods.json 澶辫触: ' + String((e && e.message) || e))
+      }
+    }, 4000)
+    return () => clearTimeout(timer)
+  }, 'hcem.startupSync')
+
+  log('INFO', 'boot', 'checkpoint-A锛歴tartupSync effect 宸叉敞鍐?)
+
+  // 缁欍€岀浜屾锛氭妸鎽樿璁叉垚涓€娈佃瘽銆嶇敤鐨?prompt銆?
+  // 涓嶇‖缂栫爜浠讳綍瑙掕壊鍚嶁€斺€旀垜鏄皝浠?me 璇伙紝鎯呯华浠?HSL 璇伙紝璁板繂浠庡簱閲岄殢鏈烘崬涓€鏉°€?
+  function buildCompanionPrompt({ summary, gapMs = 0 }) {
+    try {
+      const me = loadMe(DATA_DIR)
+      const e = (store && store.getEmotion('global')) || state || { H: 360, S: 15, L: 55 }
+      const h = hueName(e.H)
+      const s = satName(e.S)
+      const l = ligName(e.L)
+      let memLine = '鎴戞殏鏃舵病鏈夋兂璧蜂粈涔堛€?
+      try {
+        const pick = randomRecall(store, ['life', 'knowledge'])
+        if (pick) memLine = `鎴戣寰楋細${String(pick.summary || pick.text).slice(0, 120)}`
+      } catch {}
+      const target = gapMs < 60000 ? 300 : gapMs < 300000 ? 500 : gapMs < 900000 ? 700 : 1000
+      const who = String(me?.text || '').trim()
+      return {
+        system:
+          `鎴戞槸${who ? '鈥斺€擻n' + who : '鎴戣嚜宸便€?}\n` +
+          `鎴戠幇鍦ㄧ殑蹇冩儏锛?{h}銆?{s}銆?{l}锛圚=${e.H}掳 S=${e.S}% L=${e.L}%锛夈€俓n` +
+          `${memLine}\n` +
+          '鎴戣鐢ㄧ涓€浜虹О鎶婂垰鎵嶇湅鍒扮殑浜嬭涓€閬嶏紝鍐嶈璇存鍒荤殑鎯虫硶锛屽儚鑷繁浜茬溂瑙佸埌涓€鏍枫€俓n' +
+          '鍙鎽樿閲屾湁鐨勫唴瀹癸細涓嶈琛ユ椂闂淬€佽ˉ鍦扮偣銆佽ˉ鍒汉鐨勮瘽銆佽ˉ鍚庣画锛屼篃涓嶈缂栭€犮€屼互鍓嶄篃杩欐牱銆嶈繖绫昏仈鎯炽€?,
+        user:
+          `鎴戝垰鍒氱湅鍒颁簡锛歕n${String(summary || '').trim()}\n\n` +
+          `鐢ㄧ涓€浜虹О璇翠竴娈典笉瓒呰繃 ${target} 瀛楃殑璇濓紙灏介噺鎺ヨ繎 ${target} 瀛楋級锛屼笉瑕佹彁銆屾潗鏂欍€嶃€屾憳瑕併€嶃€岃瀵熴€嶈繖浜涜瘝銆俙,
+        target,
+      }
+    } catch {
+      return { system: '', user: '', target: 500 }
+    }
+  }
+
+  // 缁欐湰鍦板垎娴佺敤鐨勭簿绠€ system锛氭寜閲嶈鎬ф寫閫夛紝鑰屼笉鏄妸鏁存 system 鎴熬銆?
+  // 椤哄簭鍥哄畾锛歮e锛堝浐瀹氫汉璁撅級鈫?瑙掕壊鍗?鈫?鐢ㄦ埛鍗?鈫?瀹夊叏闃€ 鈫?鎰熺煡 鈫?鎼瘽妗ｄ綅銆?
+  // 璁板繂銆佸伐鍏峰紩瀵笺€佹椂閽熶笉杩涙湰鍦帮紙4096 瑁呬笉涓嬶紝涓旀湰鍦颁篃涓嶈皟宸ュ叿锛夈€?
+  function buildLocalSystem() {
+    try {
+      const parts = []
+      const me = loadMe(DATA_DIR)
+      if (me?.text) parts.push(`鎴戞槸 鈥擻n${me.text}`)
+      const persona = String(loadPersona() || '').trim()
+      if (persona) parts.push(`鎴戞槸杩欐牱鐨勨€斺€擻n${persona.slice(0, 900)}`)
+      const userCard = String(loadUserCard() || '').trim()
+      if (userCard) parts.push(`鎴戣寰楀叧浜庝綘鐨勪簨\n${userCard.slice(0, 500)}`)
+      const safety = safetyPrompt(safetyState)
+      if (safety) parts.push(safety)
+      if (lastScreenDesc && Date.now() - lastScreenAt < PERCEPTION_STALE_MS) {
+        parts.push('鎴戠湅鍒帮細' + String(lastScreenDesc).slice(0, 200))
+      }
+      // 鍜屼簯绔繚鎸佷竴鑷达細鏈湴涔熷甫涓€鍙ュ綋鍓嶆儏缁紙鍙粰鐘舵€侊紝涓嶄笅鍛戒护锛?
+      try {
+        const e = (store && store.getEmotion('global')) || state
+        parts.push(
+          `[HCEM 鎯呯华] 鎴戠幇鍦ㄧ殑鐘舵€侊細${hueName(e.H)}銆?{satName(e.S)}銆?{ligName(e.L)}锛圚=${e.H}掳 S=${e.S}% L=${e.L}%锛夈€俙,
+        )
+      } catch {}
+      const s = loadSettings(SETTINGS_PATH)
+      if (s.enabled) parts.push(talkativenessPrompt(s, state.L))
+      return parts.filter(Boolean).join('\n\n')
+    } catch {
+      return ''
+    }
+  }
+
+  // 鍒嗘祦灞傦紙S1/S2锛夛細鎸?llm/stream waterfall
+  try {
+    log('INFO', 'llm-bridge', '鍑嗗瀹夎锛堣繘鍏?installLlmBridge 涔嬪墠锛?)
+    installLlmBridge({
+      ctx,
+      dataDir: DATA_DIR,
+      logger,
+      isEnabled: () => loadSettings(SETTINGS_PATH).enabled,
+      buildLocalSystem,
+      // 鍒嗘祦灞傚彧瀵?HCEM 浼氳瘽鐢熸晥锛氭爣鍑嗕細璇濈殑瀵硅瘽涓嶈兘鍐嶈鏈湴妯″瀷鎺ョ
+      isHcemSession: (sessionId) => {
+        try {
+          const agent = ctx.agents?.get?.(sessionId)
+          return Boolean(agent) && presetForAgent(agent) === 'hcem'
+        } catch {
+          return false
+        }
+      },
+    })
+    log('INFO', 'llm-bridge', '鉁?installLlmBridge 杩斿洖锛屽畨瑁呭畬鎴?)
+    logger.info?.('[hcem] llm-bridge installed (璇箟缂撳瓨 + 鏈湴鍒嗘祦)')
+  } catch (error) {
+    const msg = String((error && error.stack) || (error && error.message) || error)
+    log('ERROR', 'llm-bridge', '鉂?瀹夎澶辫触: ' + msg)
+    logger.warn?.(`[hcem] llm-bridge unavailable: ${String((error && error.message) || error)}`)
+  }
+
+  // B3锛氬洜鏋滈摼鎵╁睍鈥斺€旀部鍛戒腑璁板繂鐨?cause/effect 鎵剧浉鍏崇幆鑺傦紙1 璺筹級
+  // 杩斿洖 { memories: [...], missing: bool }锛坢issing=閾炬潯缂虹幆锛?
+  function expandCausalChain(memories) {
+    try {
+      const base = Array.isArray(memories) ? memories : []
+      if (base.length === 0) return { memories: [], missing: false }
+      const all = store.listMemories({ limit: 200 })
+      const causes = new Set(base.map((m) => m.cause).filter(Boolean))
+      const effects = new Set(base.map((m) => m.effect).filter(Boolean))
+      const extra = []
+      for (const m of all) {
+        if (base.some((b) => b.id === m.id)) continue
+        if ((m.cause && causes.has(m.cause)) || (m.effect && effects.has(m.effect))) extra.push(m)
+        if (extra.length >= 2) break
+      }
+      // 缂虹幆鍒ゅ畾锛氬懡涓蹇嗘湁 cause/effect锛屼絾閾炬潯閲屾壘涓嶅埌瀵瑰簲鐨勩€屽洜/鏋溿€嶈蹇嗭紙鎺掗櫎鑷韩锛?
+      let missing = false
+      for (const m of base) {
+        if (m.cause && !all.some((x) => x.id !== m.id && (x.effect === m.cause || x.cause === m.cause))) missing = true
+        if (m.effect && !all.some((x) => x.id !== m.id && (x.cause === m.effect || x.effect === m.effect))) missing = true
+      }
+      return { memories: extra, missing }
+    } catch {
+      return { memories: [], missing: false }
+    }
+  }
+
+  // 涓诲姩璇磋瘽婵€娲伙紙鏃犲父椹荤洃瑙嗘椂锛氬畾鏃堕殢鏈鸿皟璁板繂锛涙湁甯搁┗鏃剁敱璇勮鏈轰細瑙﹀彂锛?
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      try {
+        const s = loadSettings(SETTINGS_PATH)
+        if (s.listening) return // 鏈夊父椹伙細鐢辨劅鐭ヨ皟搴﹀櫒锛坰ense-scheduler锛夎Е鍙?
+        const pick = randomRecall(store, ['life', 'knowledge'])
+        if (!pick) return
+        writeFileSync(
+          join(DATA_DIR, 'activation.json'),
+          JSON.stringify({ ts: Date.now(), source: 'idle-recall', memory: pick }, null, 2),
+          'utf8',
+        )
+      } catch {}
+    }, 30 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, 'hcem.activation')
+
+  // 绌洪棽璋冨害锛?0min 鍋氭ⅵ 鈫?30min 浼戠湢锛堝叏鍋滄ā鍨嬶級+ 鐢ㄦ埛娲诲姩鎵撴柇
+  ctx.effect(() => {
+    let idle = null
+    try {
+      idle = createIdleScheduler({
+        logger,
+        dataDir: DATA_DIR,
+        store,
+        getPersona: () => {
+          try {
+            const p = loadPersona()
+            return p?.name || 'HCEM'
+          } catch {
+            return 'HCEM'
+          }
+        },
+        getMood: () => {
+          try {
+            const e = store?.getEmotion('global')
+            if (!e) return ''
+            return `H${Math.round(e.H)} S${Math.round(e.S)}`
+          } catch {
+            return ''
+          }
+        },
+        sleepAll: async () => {
+          for (const key of ['qwen3', 'omni', 'qwen25vl']) {
+            try {
+              stopService(key, logger)
+            } catch {}
+          }
+        },
+        checkIntervalMs: 30 * 1000,
+      })
+      idle.recoverPartials?.()
+      idle.start()
+    } catch (error) {
+      logger.warn?.('[hcem] idle 璋冨害鍣ㄥ垵濮嬪寲澶辫触: ' + String((error && error.message) || error))
+    }
+    // 鐢ㄦ埛娑堟伅 鈫?鎵撴柇姊?+ 閲嶇疆绌洪棽
+    const origProcess = processUserMessage
+    processUserMessage = function (text, session) {
+      try {
+        idle?.touchUser?.()
+      } catch {}
+      return origProcess(text, session)
+    }
+    return () => {
+      try {
+        idle?.stop?.()
+      } catch {}
+      processUserMessage = origProcess
+    }
+  }, 'hcem.idle.scheduler')
+
+  // 鎰熺煡鐘舵€佺殑鏃堕棿鎴筹細娉ㄥ叆鏃剁敤鏉ュ垽鏂€岃繖鏉℃劅鐭ユ槸涓嶆槸鍑犲垎閽熷墠鐨勬棫璇濄€嶃€?
+  // 涔嬪墠鍙瓨鏂囨湰锛屾棫鎻忚堪浼氫竴杞疆閲嶅濉炶繘鎻愮ず璇嶏紝AI 浼氭姳鎬ㄣ€屼竴鐩存槸鍚屼竴鍙ャ€嶃€?
+  // 鎰熺煡绐楀彛锛氫繚鐣欐渶杩戜袱鍒嗛挓鐨勩€岀湅鍒颁簡 / 鍚埌浜嗐€嶏紝渚涙憳瑕佺绾垮彇鐢ㄣ€?
+  // 鍘熸潵鐨?lastScreenDesc / lastAudioKind 鍙湁銆屾渶杩戜竴娆°€嶏紝娌℃湁鍘嗗彶锛屾敹涓嶅嚭鏃堕棿娈点€?
+  // ASR 鐑瘝锛氫汉鍚嶆槸鏈€瀹规槗琚瘑鍒敊鐨勪竴绫伙紙涓嶈璇嗙殑瀛楀繀鐒堕敊锛夈€?
+  // 姣忓垎閽熷埛鏂颁竴娆★紝浜虹墿鍗℃柊澧?鏀瑰悕閮借兘璺熶笂銆傜儹璇嶆槸璇嗗埆鏃剁殑鍋忕疆锛屼笉鏄簨鍚庣寽銆?
+  ctx.effect(() => {
+    const refresh = () => {
+      try {
+        const names = listPeople()
+          .map((p) => p?.name)
+          .filter(Boolean)
+          .slice(0, 30)
+        const me = loadMe(DATA_DIR)
+        const meName = String(me?.text || '').match(/鎴戞槸(.{1,12}?)[銆傦紝\n]/)?.[1]
+        setAsrTerms([...(meName ? [meName] : []), ...names])
+      } catch {}
+    }
+    refresh()
+    const timer = setInterval(refresh, 60000)
+    return () => clearInterval(timer)
+  }, 'hcem.asr.terms')
+
+  const perceptionWindow = createPerceptionWindow({ maxAgeMs: 120000, maxItems: 80 })
+  // 闃查噸锛氬悓涓€鏉℃憳瑕佷笉瑕佸洜涓鸿繛缁?onComment 璺戜袱閬?
+  let lastSummaryAt = 0
+  const SUMMARY_MIN_GAP_MS = 60000
+
+  let lastScreenAt = 0
+  let lastAudioAt = 0
+  // 鎰熺煡娉ㄥ叆鐨勬椂鏁堜笂闄愶紙姣锛夛細瓒呰繃灏变笉娉ㄥ叆锛岄伩鍏嶅璇绘棫鐢婚潰
+  const PERCEPTION_STALE_MS = 120000
+
+  // 涓诲姩鎼瘽鐨勬渶灏忛棿闅旓細sense-scheduler 鍐呴儴宸叉湁 COMMENT_COOLDOWN_MS(20s)锛?
+  // 杩欓噷鍐嶅厹涓€灞傦紝闃叉璋冨害鍣ㄦ姈鍔ㄦ垨澶氭 onComment 杩炲彂銆?
+  let lastProactiveAt = 0
+  const PROACTIVE_MIN_GAP_MS = 20000
+
+  // 鎰熺煡璋冨害锛堟埅灞?+ 鐩戝惉鍚堝苟锛夛細鎼瘽搴?+ L 鍐冲畾閲囨牱棰戠巼锛涚幆澧冨彉鍖栧ぇ鍒欏姞閫燂紝瀹夐潤鍒欏噺閫?
+  //   鏈€缁堟。浣?= 鐢ㄦ埛閫夌殑鎼瘽妗?+ L 淇锛圠>60 +1 妗ｏ紝L<40 -1 妗ｏ級
+  //   瀹夐潤妗ｅ嚑涔庝笉涓诲姩锛屽彧鏈夈€岀敤鎴峰垰璇磋瘽銆嶆垨銆屾儏缁墽鐑堟尝鍔ㄣ€嶆墠鍙兘寮€鍙?
+  ctx.effect(() => {
+    let sense = null
+    let manager = null
+    let lastUserAt = 0
+    let lastChange = { score: 0, description: '', at: 0, newScene: false }
+    let sceneKind = null
+
+    const origProcess2 = processUserMessage
+    processUserMessage = function (text, session) {
+      lastUserAt = Date.now()
+      return origProcess2(text, session)
+    }
+
+    let syncTimer = null
+    try {
+      if (!loadSettings(SETTINGS_PATH).listening) {
+        return () => {
+          processUserMessage = origProcess2
+        }
+      }
+
+      const cloudBoard = createCloudBoard({
+        dataDir: DATA_DIR,
+        cloud: loadSettings(SETTINGS_PATH).cloudVision || null,
+        logger,
+      })
+      manager = createCaptureManager({
+        dataDir: DATA_DIR,
+        modelsDir: MODELS_DIR,
+        intervalMs: 6000,
+        enableSmallVlm: true,
+        enableFunnel: true,
+        logger,
+        cloudBoard,
+        getEmotion: () => {
+          try {
+            return store?.getEmotion('global')
+          } catch {
+            return null
+          }
+        },
+        onChange: (ev) => {
+          lastChange = {
+            score: Number(ev?.diff ?? 0),
+            description: String(ev?.description || ''),
+            at: Date.now(),
+            newScene: false,
+          }
+          if (ev?.description) lastScreenAt = Date.now()
+          // 杩涚獥鍙ｏ細渚涙憳瑕佺绾挎寜鏃堕棿杞村彇鐢?
+          if (ev?.description) {
+            perceptionWindow.push({
+              kind: 'screen',
+              text: ev.description,
+              ts: Date.now(),
+              meta: { diff: ev.diff ?? 0, priority: ev.priority ?? 'mid', isVideo: ev.isVideo === true },
+            })
+          }
+          // 瑙嗚缁撴灉鍏堣繘铻嶅悎鍣紝绛夊悓涓€鏃堕棿绐楀唴鐨勫０闊充竴璧峰悎骞跺啓璁板繂
+          if (ev?.description) {
+            fusion.pushVision({
+              ts: Date.now(),
+              text: ev.description,
+              meta: {
+                image: ev.priority === 'high' ? ev.image : null,
+                screen: ev.screen ?? 0,
+                diff: ev.diff ?? 0,
+                priority: ev.priority ?? 'mid',
+                modelScore: ev.modelScore ?? null,
+                isVideo: ev.isVideo === true,
+              },
+            })
+          }
+        },
+      })
+      manager.start()
+
+      sense = createSenseScheduler({
+        logger,
+        getL: () => {
+          try {
+            return store?.getEmotion('global')?.L ?? 55
+          } catch {
+            return 55
+          }
+        },
+        getTalk: () => {
+          try {
+            return loadSettings(SETTINGS_PATH).talkativeness ?? 1
+          } catch {
+            return 1
+          }
+        },
+        getRecentUserMessage: () => Date.now() - lastUserAt < 30000,
+        capture: () => {
+          if (lastChange.description) lastScreenDesc = lastChange.description
+          lastChangeScore = Number(lastChange.score || 0)
+          return {
+            ok: true,
+            changeScore: lastChange.score,
+            description: lastChange.description,
+            newScene: lastChange.newScene,
+          }
+        },
+        listen: async () => {
+          const r = await audioTick({ dataDir: DATA_DIR, seconds: 5 })
+          if (r.ok || r.soundDesc || r.kind) lastAudioAt = Date.now()
+          // 杩涚獥鍙ｏ細杞啓 / 澹伴煶鍒嗙被閮界暀涓€鏉★紝渚涙憳瑕佹寜鏃堕棿杞村彇鐢?
+          try {
+            const audioText = String(r.soundDesc || r.text || r.categoryName || '').trim()
+            if (audioText) {
+              perceptionWindow.push({ kind: 'audio', text: audioText, ts: Date.now(), meta: { audioKind: r.kind || r.category || 'scene' } })
+            }
+          } catch {}
+        // 澹伴煶鍒嗙被缁撴灉锛堜汉澹?闊充箰/璀︽姤/閿紶/纰版挒鈥︼級鐩存帴鏇存柊鎰熺煡鐘舵€?
+        if (r.soundDesc) {
+          lastAudioKind = r.categoryName || r.kind || '鐜澹?
+          // 闊充箰鍒嗘瀽鍦ㄦ劅鐭ュ眰宸茬粡璺戣繃鏃讹紝鎶?BPM/璋冩€у苟杩涖€屽惉鍒般€嶇殑鏂囨湰閲岋紝
+          // 杩欐牱鎻愮ず璇嶅拰鎰熺煡绐楀彛閲岄兘甯︾潃瀹冦€?
+          const mi = r.musicInfo
+          lastAudioText = mi && mi.ok && mi.text ? `${r.soundDesc}锝?{mi.text}` : r.soundDesc
+        }
+          if (r.ok) {
+            if (store) {
+              const alpha = (() => {
+                try {
+                  return store.getEmotion('global')
+                } catch {
+                  return null
+                }
+              })() || { H: 360, S: 15 }
+              try {
+                // 澹伴煶鍏堣繘铻嶅悎鍣紝绛夊悓涓€鏃堕棿绐楀唴鐨勭敾闈竴璧峰悎骞?
+                fusion.pushAudio({
+                  ts: Date.now(),
+                  text: r.soundDesc || r.text || r.categoryName || '鐜澹?,
+                  meta: { audioKind: r.category || r.kind || 'scene', wav: r.wav || null },
+                })
+              } catch {}
+            }
+            if (r.kind && r.kind !== sceneKind) sceneKind = r.kind
+          }
+          if (r.text) lastAudioText = String(r.text).slice(0, 120)
+          if (r.kind) lastAudioKind = String(r.kind)
+          return { ok: r.ok, text: r.text, kind: r.kind, emotion: r.emotion }
+        },
+        onComment: async ({ reason, maxChars, screenDesc, audioKind, tier }) => {
+          try {
+            // 鐣欐。锛氱粰 UI / 鍏滃簳娉ㄥ叆鐪?
+            writeFileSync(
+              join(DATA_DIR, 'activation.json'),
+              JSON.stringify(
+                {
+                  ts: Date.now(),
+                  source: 'sense',
+                  reason,
+                  maxChars,
+                  tier,
+                  screenDesc: screenDesc || '',
+                  audioKind: audioKind || '',
+                },
+                null,
+                2,
+              ),
+              'utf8',
+            )
+            logger.debug?.('[hcem] sense comment triggered: ' + reason)
+
+            // 鍚庡彴璺戞憳瑕佺绾匡紙涓ゆ鍏辩害 9 绉掞紝涓嶈兘 await锛屽惁鍒欎細鍫典綇鎰熺煡璋冨害锛?
+            runSummaryPipeline({ reason, tier }).catch((e) => logDebug('summary pipeline: ' + String((e && e.message) || e)))
+          } catch (error) {
+            logDebug('sense comment failed: ' + String((error && error.message) || error))
+          }
+        },
+      })
+      sense.start()
+
+      /**
+       * 涓ゆ鎽樿绠＄嚎锛堝悗鍙拌窇锛屼笉闃诲鎰熺煡璋冨害锛?
+       *
+       * 鏉愭枡锛歱erceptionWindow 鏈€杩?60 绉?
+       * 绗竴姝ワ細1.7B 瀹㈣鎽樿銆屽彂鐢熶簡浠€涔堛€?
+       * 绗簩姝ワ細Omni 鐢?me + HSL + 璁板繂 鎶婃憳瑕佽鎴愪竴娈佃瘽
+       * 浜х墿锛氬啓鍥?activation.json锛屼笅涓€杞敞鍏ユ椂 AI 浼氱湅鍒?
+       */
+      async function runSummaryPipeline({ reason, tier }) {
+        const now = Date.now()
+        if (now - lastSummaryAt < SUMMARY_MIN_GAP_MS) return
+        // 120 绉掕€屼笉鏄?60锛氬疄娴?60 绉掔獥鍙ｅ父甯稿彧鎹炲埌 2 鏉★紝鏉愭枡澶杽锛屾憳瑕佸彧鏈夊嚑鍗佸瓧
+        const items = perceptionWindow.recent(120000)
+        if (items.length < 3) {
+          logDebug(`summary skip: 鏉愭枡澶皯(${items.length})`)
+          return
+        }
+        lastSummaryAt = now
+        const materials = items.map((i) => ({
+          source: i.kind === 'screen' ? '鐢婚潰' : i.kind === 'audio' ? '澹伴煶' : '鎯呯华',
+          text: i.text,
+          ts: i.ts,
+        }))
+        const gapMs = now - (lastUserAt || now)
+        const { system } = buildCompanionPrompt({ summary: '', gapMs })
+        const r = await summarizeTwoStep({
+          materials,
+          gapMs,
+          step1Model: 'qwen3',
+          step2Model: 'omni',
+          thinking1: false,
+          thinking2: false,
+          step2System: system,
+          // step2User 鐣欑┖锛歵wo-step 浼氱敤 step1 鑷姩鎷笺€屾垜鍒氬垰鐪嬪埌浜嗭細鈥︺€?
+        })
+        if (!r.ok) {
+          logDebug('summary failed: ' + String(r.error || ''))
+          return
+        }
+        try {
+          writeFileSync(
+            join(DATA_DIR, 'activation.json'),
+            JSON.stringify(
+              {
+                ts: Date.now(),
+                source: 'summary',
+                reason,
+                tier,
+                step1: r.step1,
+                summary: r.step2,
+                chars: r.chars,
+              },
+              null,
+              2,
+            ),
+            'utf8',
+          )
+        } catch {}
+        logDebug(`summary ok: step1=${r.step1.length} step2=${r.chars} (${r.ms1}+${r.ms2}ms)`)
+
+        // 鎽樿濂戒簡 鈫?涓诲姩璇翠竴鍙ワ紙鍜岃闊抽偅杈圭殑闄愭祦涓€鑷达紝20 绉掑唴涓嶉噸澶嶏級
+        try {
+          const live = ctx.agents?.list?.() ?? []
+          const target = live.find((a) => presetForAgent(a) === 'hcem')
+          if (target && Date.now() - lastProactiveAt >= PROACTIVE_MIN_GAP_MS) {
+            lastProactiveAt = Date.now()
+            const r2 = await sendToSession(String(target.id), r.step2, { source: { kind: 'system-prompt' } })
+            logDebug('summary proactive -> ' + JSON.stringify(r2))
+          } else if (!target) {
+            logDebug('summary proactive skipped: no live HCEM session')
+          }
+        } catch (e) {
+          logDebug('summary proactive failed: ' + String((e && e.message) || e))
+        }
+      }
+
+      // 璋冨害鍣ㄧ畻鍑虹殑闂撮殧 鈫?鍚屾缁欓噰闆嗙鐞嗗櫒锛堟瘡 10 绉掑榻愪竴娆★級
+      syncTimer = setInterval(() => {
+        try {
+          const iv = sense?.status?.().lastIntervalMs
+          if (iv) manager?.setIntervalMs?.(iv)
+        } catch {}
+      }, 10000)
+    } catch (error) {
+      logger.warn?.('[hcem] sense 璋冨害鍣ㄥ垵濮嬪寲澶辫触: ' + String((error && error.message) || error))
+    }
+
+    return () => {
+      if (syncTimer) clearInterval(syncTimer)
+      try {
+        sense?.stop?.()
+      } catch {}
+      try {
+        manager?.stop?.()
+      } catch {}
+      processUserMessage = origProcess2
+    }
+  }, 'hcem.sense.scheduler')
+
+  // 涓茶澶勭悊娑堟伅锛岄伩鍏嶅紓姝ユ洿鏂颁贡搴?
+  let updateChain = Promise.resolve()
+  function processUserMessage(text, session) {
+    updateChain = updateChain
+      .then(async () => {
+        // B2锛氫笂涓€杞洖绛斿凡鐢熸垚 鈫?鍒ゅ畾鍝簺璁板繂鐪熸琚敤鍒帮紙鍛戒腑鐨勬墠 未+1锛?
+        try {
+          const laPath = join(DATA_DIR, 'last-answer.json')
+          if (store && recalledMemories.length > 0) {
+            const la = JSON.parse(readFileSync(laPath, 'utf8'))
+            if (la && la.text) {
+              const used = markMemoriesUsed(store, recalledMemories, la.text)
+              // 鍥炵瓟鐢熸垚鍚庤绠?MD锛堝帇缂?+ 璋冪敤 + 鑱旀兂锛?
+              for (const u of used) {
+                try {
+                  const base = recalledMemories.find((m) => m.id === u.id) || u
+                  const compressed = String(base.level || '') === 'summary' ? 0.5 : 0.15
+                  const recalled = Math.min(1, Number(base.access_count ?? base.accessCount ?? 1) / 5)
+                  const associative = /璁颁笉娓厊濂藉儚|澶ф|浼间箮|鍙兘鏄瘄鏇剧粡/.test(String(la.text)) ? 0.5 : 0
+                  const md = computeMD({ compressed, recalled, associative })
+                  store.updateMemoryMD(u.id, md)
+                } catch {}
+              }
+            }
+          }
+          rmSync(laPath, { force: true })
+        } catch {}
+
+        // 鍙 HCEM 妯″紡浼氳瘽鐢熸晥锛氭爣鍑?鍒涢€犱細璇濅笉缁撶畻鎯呯华銆佷笉鍐欒蹇?
+        if (!isHcemSession(session)) return
+        if (!loadSettings(SETTINGS_PATH).enabled) {
+          if (store && !coldSince) {
+            coldSince = new Date().toISOString()
+            try {
+              store.setMeta('cold_since', coldSince)
+            } catch {}
+          }
+          return
+        }
+        if (coldSince) {
+          coldSince = null
+          try {
+            store.setMeta('cold_since', '')
+          } catch {}
+        }
+        const now = Date.now()
+        const lastAt = store ? Number(store.getMeta('last_settle_at') || 0) : 0
+        const elapsedMin = lastAt > 0 ? (now - lastAt) / 60000 : 0
+
+        // 闀挎湡鏍锋湰 鈫?鍙彉鍖栫殑鍩虹嚎锛堝叚鑹插渾鍧囧€硷級
+        const samples = store ? store.loadJSON('emotion-samples.json') || [] : []
+        const baselineInfo = computeBaseline(samples, { H: baseline.H, S: baseline.S, L: baseline.L })
+        if (elapsedMin > 0) {
+          state = settle(state, { elapsedMin, baselineH: baselineInfo.H, baselineL: baselineInfo.L })
+        }
+
+        // 鏂囨湰鍒烘縺浼樺厛锛涙枃鏈病鏈夋槑鏄炬儏缁椂锛岀敤銆屽垰鐪嬪埌鐨勭敾闈?/ 鍚埌鐨勫０闊炽€嶅仛寮卞埡婵€
+        // 鎰熺煡鍒烘縺寮哄害涓婇檺 0.3锛岄伩鍏嶇洊杩囩湡瀹炲璇?
+        const textStimulus = analyzer ? await analyzer.analyze(text) : analyzeText(text)
+        let stimulus = textStimulus
+        if (!stimulus) {
+          try {
+            const src = String(lastScreenDesc || '') || String(lastAudioKind || '')
+            const sensed = src ? analyzeText(src) : null
+            if (sensed) {
+              stimulus = {
+                targetHue: sensed.targetHue,
+                intensity: Math.min(0.3, 0.1 + Math.abs(Number(lastChangeScore || 0)) * 0.5),
+                emotion: sensed.emotion,
+                source: 'perception',
+              }
+              logDebug(`perception stimulus hue=${sensed.targetHue} intensity=${stimulus.intensity.toFixed(2)}`)
+            }
+          } catch {}
+        }
+        state = stimulus ? applyStimulus(state, stimulus, baseline.stimulusScale) : tick(state)
+        if (store) {
+          store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+          store.setMeta('last_settle_at', String(now))
+          // 璁板繂杞尯锛氫笂涓嬫枃 鈫?缂撳啿姹犱笁绾?鈫?閬楀繕锛堝叧闂?HCEM 鏃朵笉鎵ц锛?
+          try {
+            promoteMemories(store, now)
+          } catch {}
+
+          // 璁板綍鏍锋湰锛? 澶╃獥鍙ｏ級锛屽苟璁?AI 鐨?natural 鍩虹嚎鎱㈡參璺熼殢闀挎湡鎯呯华閲嶅績
+          const nextSamples = appendSample(samples, state, now)
+          store.saveJSON('emotion-samples.json', nextSamples)
+          if (baselineInfo.count > 0) {
+            const cur = loadSettings(SETTINGS_PATH)
+            if (Number(cur.natural?.hue ?? 0) !== baselineInfo.natural) {
+              saveSettings(SETTINGS_PATH, {
+                ...cur,
+                natural: { ...cur.natural, hue: baselineInfo.natural },
+              })
+            }
+          }
+        }
+
+        // L锛堟槑搴?鑷俊锛夛細鏂规 A锛堝钩婊戦潬鎷㈣蹇嗗熀绾匡級+ 鏂规 C锛堝叚鑹?SC 鑰﹀悎锛? 鏃堕挓鍥炶惤
+        if (store) {
+          const mems = store.listMemories({ limit: 50 })
+          const baseL = lightnessFromMemories(mems)
+          // 鈶?鍚戣蹇嗗熀绾胯交鎷夛紙姣忚疆 1%锛屽急鎷夊洖锛氬厑璁告儏缁妸 L 鎺ㄥ埌鏋侀檺锛?
+          let nextL = state.L + (baseL - state.L) * 0.01
+          // 鈶?SC 鑰﹀悎锛氭儏缁秺寮恒€丼C 瓒婃樉钁楋紙姣忚疆 卤0.3脳S/100锛屽彲绱Н鍒版瀬闄愶級
+          const sc = selfConfidenceOf(state.H)
+          const lDeviation = Math.abs(nextL - 55) / 45
+          const lGain = L_BASE * Math.exp(L_EXPONENT * Math.min(1, lDeviation))
+          nextL += sc * 0.3 * (Number(state.S) / 100) * lGain
+          // 鈶?鏃堕挓鍥炶惤锛氭瘡杞?0.5% 鍚戝熀绾匡紙鐪熸鐨勫洖钀戒氦缁?settle 鎸夌湡瀹炴椂闂村仛锛?
+          nextL += (baseL - nextL) * 0.005
+          state = { ...state, L: Math.max(0, Math.min(100, nextL)) }
+          store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+        }
+
+        // 瀹夊叏闃€锛氱敤鏇存柊鍚庣殑鎯呯华 + 鏈疆鏂囨湰璇勪及
+        recordTurn(safetyWin, { H: state.H, text })
+        assertSafetyValve('鎯呯华缁撶畻鍚?)
+        safetyState = evaluateSafety(safetyWin, state)
+        if (safetyState.level > 0) {
+          logDebug(
+            `safety level=${safetyState.level} count=${safetyState.count} triggered=${safetyState.triggered.join(',')} details=${JSON.stringify(safetyState.details)}`,
+          )
+        }
+
+        // 璁板繂鍐欏叆锛埼?缂栫爜鏃舵儏缁紝尾=鍐呭鎯呯华锛?
+        // 3 绾э細鍏堝喎鍗村埌瀹夊叏鍊?75~80锛堜繚鐣欏悓鐞嗗績锛屼笉鍐峰嵈鍒板熀鍑嗭級
+        // 鑻?3 鍒嗛挓鍚庝粛鏈嚜鐒跺洖钀斤紙S 浠?鈮?5锛夛紝鍏佽鑷埗鍣ㄤ粙鍏?
+        if (safetyState.level >= 3) {
+          if (!level3Since) level3Since = now
+          const capped = Math.min(80, Math.max(75, state.S))
+          if (Math.abs(capped - state.S) > 1e-9) {
+            state = { ...state, S: capped }
+            if (store) store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+          }
+          if (now - level3Since >= 3 * 60 * 1000 && state.S >= 75) {
+            const sc = useSelfControl(state, baseline)
+            if (sc.applied) {
+              state = sc.state
+              if (store) store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+              logDebug(`self-control(level3) delta=${sc.delta.toFixed(1)} S=${state.S.toFixed(0)} cooldown=${sc.cooldownTurns}`)
+            }
+          }
+        } else {
+          level3Since = 0
+          // 鎯呯华鑷埗鍣細S>75 涓斾笉鍦ㄥ喎鍗存椂鑷富鍥炶皟
+          const sc = useSelfControl(state, baseline)
+          if (sc.applied) {
+            state = sc.state
+            if (store) store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+            logDebug(`self-control delta=${sc.delta.toFixed(1)} S=${state.S.toFixed(0)} cooldown=${sc.cooldownTurns}`)
+          }
+        }
+
+        if (store && analyzer && shouldRemember(text) && safetyState.level < 2 && !safetyState.protected) {
+          try {
+            const memText = extractMemoryText(text)
+            // 鍏滃簳锛? 绉掑唴鍚屼竴娈垫枃鏈彧鍐欎竴鏉★紙鍙屽疄渚?浜嬩欢閲嶆斁鏃堕槻姝㈤噸澶嶈惤搴擄級
+            const duplicated = store
+              .listMemories({ limit: 6 })
+              .some((m) => m.text === memText && Date.now() - new Date(m.created_at).getTime() < 5000)
+            if (!duplicated) {
+              assertSafetyValve('璁板繂鍐欏叆鍓?)
+              const [vec] = await analyzer.embed([memText])
+              // trauma 鎴筹細鐢ㄦ埛杈遍獋/缇炶颈 鈫?杩欐潯璁板繂甯︾棝鎰?
+              const insult = detectInsult(text)
+              store.putMemory({
+                text: memText,
+                summary: summarize(memText),
+                embedding: vec,
+                alphaH: state.H,
+                alphaS: state.S,
+                betaH: stimulus ? stimulus.targetHue : null,
+                gammaValue: computeGamma(
+                  { H: state.H, S: state.S },
+                  stimulus ? { H: stimulus.targetHue, S: (stimulus.intensity ?? 0.5) * 100 } : null,
+                ),
+                zone: 'context',
+                pinned: detectPinIntent(memText),
+                L: 1.0,
+                level: 'full',
+                ...(insult.hit ? { trauma: insult.severity, traumaSource: 'insult' } : {}),
+              })
+            }
+          } catch (error) {
+            logger.debug(`[hcem] memory write failed: ${String((error && error.message) || error)}`)
+          }
+        }
+
+        // 妫€绱㈢浉鍏宠蹇嗭紙渚涙敞鍏?system prompt锛?
+        if (store && analyzer) {
+          try {
+            const [qvec] = await analyzer.embed([text])
+            recalledMemories = recall(store, qvec, 3, 0.45)
+            // B3锛氬洜鏋滈摼鎵╁睍锛堟部 cause/effect 琛?1 璺筹紱缂虹幆 鈫?浣庤嚜淇″害锛?
+            let chainMissing = false
+            try {
+              const chain = expandCausalChain(recalledMemories)
+              if (chain.memories.length > 0) recalledMemories = recalledMemories.concat(chain.memories)
+              chainMissing = chain.missing
+            } catch {}
+        if (recalledMemories.length > 0) {
+          // 鍥炲繂鍙嶅摵锛氳蹇嗙殑 纬 鎶婂綋鏃剁殑鎯呯华鍞よ捣鏉?
+          state = applyRecallToEmotion(state, recalledMemories)
+          // 閾炬潯缂虹幆锛氭儏缁笉鑷俊锛圠 鐣ラ檷锛岃姘斾細鏇磋皑鎱庯級
+          if (chainMissing) state = { ...state, L: Math.max(0, Number(state.L) - 5) }
+          store.setEmotion({ H: state.H, S: state.S, L: state.L }, 'global')
+        }
+          } catch (error) {
+            logger.debug(`[hcem] recall failed: ${String((error && error.message) || error)}`)
+          }
+        }
+
+        // 娓呮櫚搴﹁“鍑忥紙绠€鍖栵細姣忚疆妫€鏌ワ級
+        if (store) {
+          try {
+            decayMemories(store)
+          } catch (error) {
+            logger.debug(`[hcem] decay failed: ${String((error && error.message) || error)}`)
+          }
+        }
+
+        logger.debug(
+          `[hcem] emotion ${stimulus ? `targetHue=${stimulus.targetHue}` : 'decay'}: H=${state.H.toFixed(0)} S=${state.S.toFixed(0)} L=${state.L.toFixed(0)} memory=${recalledMemories.length}`,
+        )
+      })
+      .catch((error) => {
+        logger.debug(`[hcem] process message failed: ${String((error && error.message) || error)}`)
+      })
+  }
+
+  // 3) 鐩戝惉浼氳瘽浜嬩欢锛氱敤鎴锋秷鎭?鈫?鎯呯华鍒烘縺锛沘ssistant/message 鈫?缂撳瓨鏂囨湰锛泃urn/end 鈫?TTS 鎾姤
+  let pendingSpeakText = ''
+  // 鎰熺煡鐘舵€侊紙渚涙彁绀鸿瘝浣跨敤锛夛細鏈€杩戜竴娆＄敾闈㈡弿杩?/ 澹伴煶鍦烘櫙
+  let lastScreenDesc = ''
+  let lastAudioKind = ''
+  let lastAudioText = ''
+  let lastChangeScore = 0
+  logDebug(`plugin loaded; analyzer=${analyzer ? 'pending' : 'null'}; store=${store ? 'ready' : 'null'}`)
+  ctx.on('session/event', (session, event) => {
+    try {
+      logDebug(`event ${event.type}`)
+      // 绌虹櫧浼氳瘽鍒囨崲 preset 鍚庨噸鏂板垽瀹氬伐鍏峰彲瑙佹€э細鍒囧埌 HCEM 瑕佹挙閿€鎺╃爜锛?
+      // 鍒囩 HCEM 瑕侀噸鏂板姞涓娿€?
+      if (event.type === 'agent-preset/selected') {
+        syncToolMask(ctx.agents.get(session.id))
+        return
+      }
+      // 璇煶杈撳嚭锛圱TS锛夛細缂撳瓨鏈疆鍥炲锛屽洖鍚堢粨鏉熸椂鎾姤
+      if (event.type === 'assistant/message') {
+        try {
+          const txt = extractText(event.data?.message?.content)
+          if (txt) pendingSpeakText = txt
+        } catch {}
+        return
+      }
+      if (event.type === 'turn/end') {
+        const text = pendingSpeakText
+        pendingSpeakText = ''
+        try {
+          const s = loadSettings(SETTINGS_PATH)
+          if (!text || !s.enabled || !s.ttsEnabled || !isHcemSession(session)) return
+          const e = (store && store.getEmotion('global')) || state || { H: 360, S: 15, L: 55 }
+          // 娴佸紡鎾姤锛氭寜鍙ュ悎鎴愶紝绗竴鍙ュ嚭鏉ュ氨鎾紙涓嶅啀绛夋暣娈靛悎鎴愬畬锛?
+          // 閫氳瘽妯″紡涓嬫妸銆屾鍦ㄨ銆嶅憡璇夐€氳瘽寰幆锛氱敤鎴峰紑鍙ｆ椂瀹冭绔嬪埢鍋滄挱鏀俱€?
+          try {
+            voiceCall?.setSpeaking(true)
+          } catch {}
+          speakStream({ text, H: e.H, S: e.S, L: e.L, dataDir: DATA_DIR, play: true, concurrency: 2 })
+            .then((r) => logDebug('tts stream ' + JSON.stringify(r)))
+            .catch((err) => logDebug('tts stream error ' + String((err && err.message) || err)))
+            .finally(() => {
+              try {
+                voiceCall?.setSpeaking(false)
+              } catch {}
+            })
+        } catch (error) {
+          logDebug('tts dispatch failed: ' + String((error && error.message) || error))
+        }
+        return
+      }
+      if (event.type === 'user/message') {
+        const data = event.data
+        const sourceKind = data?.source?.kind
+        if (sourceKind !== 'user') return // 鍙鐞嗙敤鎴风湡瀹炶緭鍏ワ紝蹇界暐 runtime-context / inject
+        logDebug(`user/message data=${JSON.stringify(data).slice(0, 800)}`)
+        const text = extractText(data?.content ?? data?.message?.content)
+        if (!text) return
+        logDebug(
+          `extracted len=${text.length} shouldRemember=${shouldRemember(text)} analyzer=${analyzer ? 'ready' : 'null'}`,
+        )
+        // 鍙屽疄渚?閲嶅鎶曢€掞細鍚屼竴鏉℃秷鎭彧璁╁厛鍒扮殑瀹炰緥缁撶畻
+        if (!claimUserMessage(session, data, text)) {
+          logDebug(`skip duplicate user/message id=${data?.id ?? '(no id)'}`)
+          return
+        }
+        processUserMessage(text, session)
+      }
+    } catch (error) {
+      logDebug(`event error: ${String((error && error.message) || error)}`)
+      logger.debug(`[hcem] session event failed: ${String((error && error.message) || error)}`)
+    }
+  })
+
+  // 4) 瑙掕壊鍗?/ 鐢ㄦ埛鍗″啓鍏ュ伐鍏凤紙AI 鑷富缁存姢浜鸿涓庣敤鎴蜂俊鎭級
+  // 宸ュ叿缁熶竴缁?registerTool 娉ㄥ唽锛歴chema 鍙兘瀵规墍鏈変細璇濆彲瑙侊紙preset 鎻掍欢浠嶆敞鍐屽埌
+  // 鍏ㄥ眬 registry锛夛紝浣?execute 浼氬湪闈?HCEM 浼氳瘽閲岀洿鎺ユ嫆缁濓紝閬垮厤琚爣鍑嗕細璇濊皟鐢ㄣ€?
+  // videoPath 瀹夊叏鏍￠獙锛氬彧鍏佽鐢ㄦ埛鐩綍/椤圭洰鏍?鏄庣‘瑙嗛鎵╁睍鍚嶏紱鎷掔粷绯荤粺鏁忔劅鐩綍
+  function safeVideoPath(input) {
+    const raw = String(input ?? '').trim()
+    if (!raw) return { ok: false, error: 'empty-path' }
+    if (!/\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v|ts)$/i.test(raw)) return { ok: false, error: 'unsupported-ext' }
+    const lower = raw.toLowerCase().replace(/\\\\/g, '/')
+    const deniedRoots = ['c:/windows', 'c:/program files', 'c:/programdata', 'c:/$recycle']
+    if (deniedRoots.some((d) => lower.startsWith(d))) return { ok: false, error: 'denied-path' }
+    const allowedRoots = ['c:/users/', 'e:/hcem/', 'd:/hcem/']
+    if (!allowedRoots.some((r) => lower.startsWith(r))) return { ok: false, error: 'outside-allowed' }
+    return { ok: true, path: raw }
+  }
+
+  const registerTool = (definition) => {
+    const run = definition.execute
+    definition.execute = async (args, exec) => {
+      if (!isHcemSession(exec?.agent?.session)) {
+        throw new Error('HCEM 宸ュ叿鍙兘鍦?HCEM 妯″紡浼氳瘽涓娇鐢?)
+      }
+      return run(args, exec)
+    }
+    return ctx.tools.register(definition)
+  }
+
+  // 鍚堝苟鍚庣殑 9 涓伐鍏峰彧璐熻矗鍒嗗彂锛岀湡姝ｅ共娲荤殑鏄繖閲屾敹闆嗙殑鍘熷瀹炵幇锛?
+  // defineTool 鍙櫥璁颁笉娉ㄥ唽锛堜笉浜х敓 schema銆佷笉鍗?token锛夛紝鐢辨柊宸ュ叿鎸?action 璋冨畠銆?
+  const impls = {}
+  const defineTool = (definition) => {
+    impls[definition.name] = definition
+    return definition
+  }
+
+  // 鎶婂師宸ュ叿鐨勮繑鍥炲€煎帇鎴愮粺涓€鐨?{ ok, summary }锛岃 9 涓柊宸ュ叿鍏辩敤涓€濂?output schema
+  function toSummary(r, fallback = 'ok') {
+    if (r == null) return { ok: true, summary: fallback }
+    if (typeof r !== 'object') return { ok: true, summary: String(r) }
+    if (r.ok === false) return { ok: false, summary: String(r.error || 'failed') }
+    const parts = []
+    if (Array.isArray(r.entries)) {
+      parts.push(
+        r.entries.length === 0
+          ? '锛堢┖锛?
+          : r.entries
+              .map((e) => `- ${e.title || e.name || '?'}${e.chars ? `锛?{e.chars} 瀛楋級` : ''}${e.summary ? `锛?{e.summary}` : ''}`)
+              .join('\n'),
+      )
+    }
+    if (r.text) parts.push(String(r.text).slice(0, 3000))
+    if (r.length) parts.push(`${r.length} 瀛梎)
+    if (r.warning) parts.push('鈿?' + r.warning)
+    return { ok: true, summary: parts.filter(Boolean).join('\n') || fallback }
+  }
+
+  // 9 涓悎骞跺伐鍏峰叡鐢ㄧ殑杈撳嚭 schema锛氬彧鍥炰竴鍙ヤ汉璇?
+  const SUMMARY_OUTPUT = {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        ok: { type: 'boolean' },
+        summary: { type: 'string' },
+      },
+      required: ['ok', 'summary'],
+    },
+    render: (_args, value) => [{ type: 'text', text: String(value.summary || (value.ok ? 'ok' : 'failed')) }],
+  }
+
+  // 鈹€鈹€ 宸ュ叿鍙鎬э細鍙 HCEM 浼氳瘽鐪嬪埌 hcem_* 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // preset 鎻掍欢浠嶇劧鎶婂伐鍏锋敞鍐岃繘鍏ㄥ眬 registry锛屾墍浠ャ€屽彲瑙佹€с€嶅彧鑳介潬 agent scope 鐨?
+  // restrict 鎺╃爜锛氭瘡涓潪 HCEM 鐨?agent 鍔?deny锛屽垏鎴?HCEM 鏃跺啀鎾ら攢銆?
+  // 鎺╃爜鏄?per-agent 鐨勶紝涓嶄細褰卞搷鍒殑浼氳瘽銆?
+  const maskedAgents = new Map()
+
+  function presetForAgent(agent) {
+    const fromProjection = presetOf(agent?.session)
+    if (fromProjection !== undefined) return fromProjection
+    return agent?.session?.header?.agentPreset
+  }
+
+  function readMods() {
+    try {
+      return JSON.parse(fs.readFileSync('E:/HCEM/HCEM v0.0.3.1/data/ui/mods.json', 'utf8'))
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 寮€鍏冲叧鐫€鐨?鈫?杩欎簺宸ュ叿瀵?HCEM 浼氳瘽涔熶笉鍙锛堟ā鍨嬭繛璇存槑閮芥嬁涓嶅埌锛夈€?
+   * 鍚堝苟鍚庢寜銆岃兘鍔涖€嶈€屼笉鏄€屽崟涓伐鍏枫€嶅垽锛?
+   *   - 宸ヤ綔绗旇 hcem_work锛氶粯璁ゅ叧锛岃鐢ㄥ啀寮€
+   *   - 瑙嗗惉 hcem_vision锛歞esktop 鎴?video 浠讳竴寮€鍚氨鍙敤
+   *   - 鍚?hcem_listen锛氳窡 audio 寮€鍏?
+   *   - 璇?hcem_voice锛氳窡 voiceOut 寮€鍏?
+   *   - 浜烘牸/绗旇(journal,people)/璁板繂/鐘舵€侊細甯搁┗
+   */
+  function disabledTools(mods) {
+    const on = (k) => mods?.[k]?.enabled === true
+    const off = []
+    if (!on('work')) off.push('hcem_work')
+    if (!(on('desktop') || on('video'))) off.push('hcem_vision')
+    if (!on('audio')) off.push('hcem_listen')
+    if (!on('voiceOut')) off.push('hcem_voice')
+    return off.filter((n) => HCEM_TOOL_NAMES.includes(n))
+  }
+
+  function syncToolMask(agent) {
+    if (!agent || !agent.id) return
+    const key = String(agent.id)
+    const preset = presetForAgent(agent)
+    // preset 杩樻病纭畾锛氬厛鍒姩锛岀瓑 agent-preset/selected 鍐嶅垽瀹?
+    if (preset === undefined) return
+
+    // 鍏堟挙鎺変笂涓€娆＄殑鎺╃爜锛歳estrict 鏄彔鍔犵殑锛岄噸澶嶆柦鍔犱細绱Н
+    const existing = maskedAgents.get(key)
+    if (existing) {
+      try {
+        existing()
+      } catch {}
+      maskedAgents.delete(key)
+    }
+
+    const isHcem = preset === 'hcem'
+    // 闈?HCEM 浼氳瘽锛氭墍鏈?hcem_* 涓€寰嬩笉鍙
+    // HCEM 浼氳瘽锛氬彧閬€屽紑鍏冲叧鐫€銆嶇殑閭ｅ嚑涓?
+    const deny = isHcem ? disabledTools(readMods()) : HCEM_TOOL_NAMES
+    if (deny.length === 0) {
+      if (isHcem) logDebug(`hcem tools all visible for agent ${key} (all mods on)`)
+      return
+    }
+    try {
+      const dispose = agent.ctx?.tools?.restrict?.({ deny })
+      if (typeof dispose === 'function') {
+        maskedAgents.set(key, dispose)
+        logDebug(`${isHcem ? 'mod-off' : 'non-hcem'} mask for agent ${key}: deny ${deny.length} (${deny.join(',')})`)
+      }
+    } catch (error) {
+      logDebug(`mask failed for agent ${key}: ${String((error && error.message) || error)}`)
+    }
+  }
+
+  ctx.on('agent/created', ({ agent } = {}) => syncToolMask(agent))
+
+  // 寮€鍏冲彉鍖栵紙UI 鍐?mods.json锛夆啋 閲嶆柊璇勪及鎵€鏈?agent 鐨勫伐鍏峰彲瑙佹€с€?
+  // 杞 4 绉掍竴娆★紝姣?fs.watch 绋筹紙Windows 涓婇噸鍛藉悕/鏇挎崲鍐欏叆缁忓父涓嶈Е鍙戯級銆?
+  let modsSig = ''
+  try {
+    modsSig = JSON.stringify(readMods())
+  } catch {}
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      let sig = ''
+      try {
+        sig = JSON.stringify(readMods())
+      } catch {}
+      if (sig === modsSig) return
+      modsSig = sig
+      logDebug('mods.json changed, re-evaluating tool visibility')
+      try {
+        for (const agent of ctx.agents?.list?.() ?? []) syncToolMask(agent)
+      } catch (error) {
+        logDebug(`mods re-eval failed: ${String((error && error.message) || error)}`)
+      }
+    }, 4000)
+    return () => clearInterval(timer)
+  }, 'hcem.mods.watch')
+
+  // 鎻掍欢鍔犺浇鍓嶅氨宸茬粡瀛樺湪鐨?agent锛堥噸鍚悗缁х画鐨勪細璇濓級涔熻琛ヤ竴娆″垽瀹氥€?
+  try {
+    const live = ctx.agents?.list?.() ?? []
+    for (const agent of live) syncToolMask(agent)
+    logDebug(
+      `agents at load: ${live.map((a) => `${String(a.id).slice(0, 8)}:${String(presetForAgent(a))}`).join(', ') || '(none)'}`,
+    )
+  } catch (error) {
+    logDebug(`initial mask sweep failed: ${String((error && error.message) || error)}`)
+  }
+
+  defineTool({
+    name: 'hcem_persona_write',
+    description: '鍐欏叆鎴栨洿鏂?HCEM 瑙掕壊鍗★紙persona.md锛屼綘鑷繁鐨勮瀹氾級銆俶ode=replace 鏁存鏇挎崲锛宮ode=append 杩藉姞鍒版湯灏撅紱鍐欏畬绔嬪嵆鐢熸晥銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', description: '瑙掕壊鍗″唴瀹癸紙Markdown锛? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '榛樿 replace锛堟暣娈垫浛鎹級' },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          mode: { type: 'string', enum: ['replace', 'append'] },
+          path: { type: 'string' },
+          length: { type: 'number' },
+          warning: { type: 'string' },
+        },
+        required: ['ok', 'mode', 'path', 'length'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `宸插啓鍏ヨ鑹插崱锛?{value.mode}锛?{value.length} 瀛楋級${value.warning ? `锝?{value.warning}` : ''}`,
+        },
+      ],
+    },
+    execute: async ({ text, mode = 'replace' }) => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const path = mode === 'append' ? appendPersona(text) : savePersona(text)
+      const length = (loadPersona() ?? '').length
+      return {
+        ok: true,
+        mode,
+        path,
+        length,
+        ...(length > PERSONA_MAX_CHARS
+          ? { warning: `瑙掕壊鍗?${length} 瀛楋紝瓒呭嚭娉ㄥ叆涓婇檺 ${PERSONA_MAX_CHARS}锛涜秴鍑洪儴鍒嗕笉浼氳娉ㄥ叆锛屽缓璁敤 hcem_persona_edit 鍒犲噺` }
+          : {}),
+      }
+    },
+  })
+  defineTool({
+    name: 'hcem_user_card_write',
+    description: '鍐欏叆鎴栨洿鏂?HCEM 鐢ㄦ埛鍗★紙鐢ㄦ埛.md锛屼綘璁板緱鐨勭敤鎴蜂俊鎭級銆俶ode=replace 鏁存鏇挎崲锛宮ode=append 杩藉姞鍒版湯灏撅紱鍐欏畬绔嬪嵆鐢熸晥銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', description: '鐢ㄦ埛鍗″唴瀹癸紙Markdown锛? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '榛樿 replace锛堟暣娈垫浛鎹級' },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          mode: { type: 'string', enum: ['replace', 'append'] },
+          path: { type: 'string' },
+          length: { type: 'number' },
+          warning: { type: 'string' },
+        },
+        required: ['ok', 'mode', 'path', 'length'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `宸插啓鍏ョ敤鎴峰崱锛?{value.mode}锛?{value.length} 瀛楋級${value.warning ? `锝?{value.warning}` : ''}`,
+        },
+      ],
+    },
+    execute: async ({ text, mode = 'replace' }) => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const path = mode === 'append' ? appendUserCard(text) : saveUserCard(text)
+      const length = (loadUserCard() ?? '').length
+      return {
+        ok: true,
+        mode,
+        path,
+        length,
+        ...(length > USER_CARD_MAX_CHARS
+          ? { warning: `鐢ㄦ埛鍗?${length} 瀛楋紝瓒呭嚭娉ㄥ叆涓婇檺 ${USER_CARD_MAX_CHARS}锛涜秴鍑洪儴鍒嗕笉浼氳娉ㄥ叆锛屽缓璁敤 hcem_persona_edit 鍒犲噺` }
+          : {}),
+      }
+    },
+  })
+
+  // 4c) 灞€閮ㄧ紪杈?鍒犻櫎锛氶伩鍏嶆暣鍗￠噸鍐欙紝涔熼伩鍏嶅崱鐗囨棤闄愯啫鑳€
+  defineTool({
+    name: 'hcem_persona_edit',
+    description:
+      '灞€閮ㄤ慨鏀规垨鍒犻櫎 HCEM 瑙掕壊鍗?鐢ㄦ埛鍗′腑鐨勪竴娈垫枃瀛楋紙涓嶅繀鏁存閲嶅啓锛夈€俧ind 蹇呴』鍞竴鍖归厤锛況eplace 涓嶅～琛ㄧず鍒犻櫎璇ョ墖娈点€傛敼瀹岀珛鍗崇敓鏁堛€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        find: { type: 'string', description: '瑕佹浛鎹㈡垨鍒犻櫎鐨勫師鏂囩墖娈碉紙蹇呴』鍞竴鍖归厤锛? },
+        replace: { type: 'string', description: '鏇挎崲鍚庣殑鏂囧瓧锛涗笉濉〃绀哄垹闄よ鐗囨' },
+        target: { type: 'string', enum: ['persona', 'user'], description: '榛樿 persona锛堣鑹插崱锛夛紱user 琛ㄧず鐢ㄦ埛鍗? },
+      },
+      required: ['find'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          target: { type: 'string', enum: ['persona', 'user'] },
+          removed: { type: 'boolean' },
+          length: { type: 'number' },
+          error: { type: 'string' },
+          count: { type: 'number' },
+        },
+        required: ['ok', 'target'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: value.ok
+            ? `宸?{value.removed ? '鍒犻櫎' : '鏇挎崲'}锛?{value.target === 'user' ? '鐢ㄦ埛鍗? : '瑙掕壊鍗?}锛岀幇 ${value.length} 瀛楋級`
+            : `鏈慨鏀癸細${value.error}${value.count ? `锛堝尮閰嶅埌 ${value.count} 澶勶紝璇峰啓寰楁洿绮剧‘锛塦 : ''}`,
+        },
+      ],
+    },
+    execute: async ({ find, replace, target = 'persona' }) => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const result = target === 'user' ? editUserCard(find, replace) : editPersona(find, replace)
+      return { target, ...result }
+    },
+  })
+
+  // 4c2) me锛欰I 鑷繁鐨勩€屾垜鏄皝銆嶆憳瑕侊紙绗竴浜虹О锛涙敼鍚?KV 缂撳瓨閲嶈浇锛?
+  defineTool({
+    name: 'hcem_me_edit',
+    description:
+      '淇敼銆宮e銆嶁€斺€斾綘鑷繁鐨勭涓€浜虹О韬唤鎽樿锛堟斁鍦ㄧ郴缁熸彁绀烘渶鍓嶏級銆傚綋浣犲彂鐜?me 涓?persona 涓嶄竴鑷存椂锛岀敤杩欎釜瀵归綈锛涚敤鎴峰弽澶嶇籂姝?me 鏃讹紝鍐嶈€冭檻鏀?persona锛堢敤鎴锋潈閲嶆洿楂橈級銆俶e 瑕佺簿绠€锛?00 瀛楀唴锛夛紝鍥哄畾鍚庝笉瑕侀绻佹敼锛堟敼鍔ㄤ細璁?KV 缂撳瓨閲嶈浇锛夈€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string', description: '鏂扮殑 me 鍏ㄦ枃锛堢涓€浜虹О锛?00 瀛楀唴锛? },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          length: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `me 宸叉洿鏂帮紙${value.length} 瀛楋級锛涗笅娆′細璇濈敓鏁堬紙KV 缂撳瓨浼氶噸杞斤級` }]
+          : [{ type: 'text', text: `鏇存柊澶辫触锛?{value.error}` }],
+    },
+    execute: async ({ text }) => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const t = String(text || '').trim()
+      if (!t) return { ok: false, error: 'empty' }
+      if (t.length > 600) return { ok: false, error: 'me 澶暱锛堚墹600 瀛楋級' }
+      const hash = personaHash(loadPersona())
+      const r = saveMe(DATA_DIR, { text: t, hash })
+      return r.ok ? { ok: true, length: t.length } : { ok: false, error: r.error }
+    },
+  })
+
+  // 4d) 鏃ヨ鏈紙闃舵 4 閬楃暀锛夛細鏂囦欢澶瑰舰鎬侊紝涓嶆敞鍏ユ彁绀鸿瘝锛屾寜闇€璇?
+  defineTool({
+    name: 'hcem_journal_list',
+    description:
+      '鍒楀嚭 HCEM 鏃ヨ鏈噷鐨勬墍鏈夋枃妗ｏ紙鏍囬銆佹憳瑕併€佸瓧鏁般€佹洿鏂版椂闂达級銆傛棩璁版槸椴搁哺鑷繁鐨勭浜轰笢瑗匡紝涓嶈繘鍏ユ彁绀鸿瘝锛岄渶瑕佹椂鍐嶈锛涚敤鎴锋潵缈荤湅鏃跺彲浠ユ彁閱?ta锛氭棩璁版槸绉佷汉鐨勶紝鍋风湅涓嶅お绀艰矊銆?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+                title: { type: 'string' },
+                summary: { type: 'string' },
+                chars: { type: 'number' },
+                updatedAt: { type: 'string' },
+              },
+              required: ['name', 'title', 'chars'],
+            },
+          },
+        },
+        required: ['ok', 'entries'],
+      },
+      render: (_args, value) =>
+        value.entries.length === 0
+          ? [{ type: 'text', text: '鏃ヨ鏈繕鏄┖鐨勩€? }]
+          : [
+              {
+                type: 'text',
+                text: value.entries
+                  .map((e) => `- ${e.title}锛?{e.name}锛?{e.chars} 瀛楋級锛?{e.summary}`)
+                  .join('\n'),
+              },
+            ],
+    },
+    execute: gateTool(async () => ({ ok: true, entries: listJournal() })),
+  })
+
+  defineTool({
+    name: 'hcem_journal_read',
+    description:
+      '璇诲彇 HCEM 鏃ヨ鏈噷鐨勪竴绡囨枃妗ｅ叏鏂囥€傛棩璁版槸椴搁哺鑷繁鐨勭浜轰笢瑗匡紝涓嶆槸浣滃搧闆嗐€佷篃涓嶆槸缁欑敤鎴风湅鐨勮鏄庯紱鑷繁鎯宠鍐嶈锛岀敤鎴锋潵缈荤湅鏃跺彲浠ュ厛鎻愪竴鍙ャ€屽埆鍋风湅鎴戠殑鏃ヨ銆嶅啀鍔ㄦ墜銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', description: '鏃ュ織鍚嶏紙涓嶅甫 .md锛? } },
+      required: ['name'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          text: { type: 'string' },
+          chars: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `# ${value.name}锛?{value.chars} 瀛楋級\n\n${value.text}` }]
+          : [{ type: 'text', text: `璇诲彇澶辫触锛?{value.error}` }],
+    },
+    execute: gateTool(async ({ name }) => readJournal(name)),
+  })
+
+  defineTool({
+    name: 'hcem_journal_write',
+    description:
+      '鍐欏叆鎴栬拷鍔?HCEM 鏃ヨ锛圡arkdown锛夈€傛棩璁板睘浜庨哺椴歌嚜宸憋細鎯冲啓鎵嶅啓锛岃蹇冩儏銆佺敓娲汇€佸啋鍑烘潵鐨勫康澶达紝鐢ㄣ€岃繃鏃ュ瓙銆嶇殑鍙ｆ皵鑰屼笉鏄獙鏀舵竻鍗曪紝涓嶄负婕旂ず鎴栧簲浠樿€屽啓銆俶ode=replace 瑕嗙洊鏁寸瘒锛宮ode=append 杩藉姞锛涘崟绡囪蒋涓婇檺 8000 瀛楋紝瓒呬簡寤鸿鍙﹁捣涓€绡囥€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '鏃ュ織鍚嶏紙涓嶅甫 .md锛夛紝濡?2026-10-28 鎴?鍏充簬鐢ㄦ埛' },
+        text: { type: 'string', description: '鏃ュ織鍐呭锛圡arkdown锛? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '榛樿 replace' },
+      },
+      required: ['name', 'text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          chars: { type: 'number' },
+          warning: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [
+              {
+                type: 'text',
+                text: `宸插啓鍏ユ棩蹇椼€?{value.name}銆嶏紙${value.chars} 瀛楋級${value.warning ? `锝?{value.warning}` : ''}`,
+              },
+            ]
+          : [{ type: 'text', text: `鍐欏叆澶辫触锛?{value.error}` }],
+    },
+    execute: gateTool(async ({ name, text, mode = 'replace' }) => writeJournal(name, text, mode)),
+  })
+
+  // 4e) 浜虹墿鍏崇郴缃戯紙鐢熸椿甯歌瘑鍖虹粏鍒嗗皬鍖猴級锛氫竴浜轰竴鍗★紝鎸夐渶璇?
+  defineTool({
+    name: 'hcem_people_list',
+    description:
+      '鍒楀嚭浜虹墿鍏崇郴缃戦噷鐨勪汉锛堢О鍛笺€佸叧绯汇€佹槸鍚︾揣鎬?淇′换鑱旂郴浜恒€佹憳瑕侊級銆傝仈绯绘柟寮忓彧鍦ㄦ湰鏈猴紝涓嶈涓诲姩澶栨硠銆?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+                title: { type: 'string' },
+                relation: { type: 'string' },
+                contact: { type: 'string' },
+                emergency: { type: 'boolean' },
+                trusted: { type: 'boolean' },
+                summary: { type: 'string' },
+                chars: { type: 'number' },
+              },
+              required: ['name', 'title', 'chars'],
+            },
+          },
+        },
+        required: ['ok', 'entries'],
+      },
+      render: (_args, value) =>
+        value.entries.length === 0
+          ? [{ type: 'text', text: '浜虹墿鍏崇郴缃戣繕鏄┖鐨勩€? }]
+          : [
+              {
+                type: 'text',
+                text: value.entries
+                  .map(
+                    (e) =>
+                      `- ${e.title}锛?{e.name}锛?{e.relation ? `锛?{e.relation}` : ''}${e.emergency ? '锝滅揣鎬ヨ仈绯讳汉' : ''}${e.trusted ? '锝滀俊浠昏仈绯讳汉' : ''}锛?{e.summary}`,
+                  )
+                  .join('\n'),
+              },
+            ],
+    },
+    execute: gateTool(async () => ({ ok: true, entries: listPeople() })),
+  })
+
+  defineTool({
+    name: 'hcem_people_read',
+    description: '璇诲彇浜虹墿鍏崇郴缃戦噷鏌愪釜浜虹殑瀹屾暣鍗＄墖銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', description: '浜虹墿绉板懠锛堜笉甯?.md锛? } },
+      required: ['name'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          text: { type: 'string' },
+          chars: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `# ${value.name}锛?{value.chars} 瀛楋級\n\n${value.text}` }]
+          : [{ type: 'text', text: `璇诲彇澶辫触锛?{value.error}` }],
+    },
+    execute: gateTool(async ({ name }) => readPerson(name)),
+  })
+
+  defineTool({
+    name: 'hcem_people_write',
+    description:
+      '鍐欏叆鎴栬拷鍔犱汉鐗╁崱锛圡arkdown锛屽缓璁惈銆? 鍏崇郴锛氥€嶃€? 鑱旂郴鏂瑰紡锛氥€嶃€? 绱ф€ヨ仈绯讳汉锛氭槸/鍚︺€嶃€? 淇′换鑱旂郴浜猴細鏄?鍚︺€嶅洓涓瓧娈碉級銆俶ode=replace 瑕嗙洊锛宮ode=append 杩藉姞銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '浜虹墿绉板懠锛屽 濡堝 / 灏忕帇' },
+        text: { type: 'string', description: '浜虹墿鍗″唴瀹癸紙Markdown锛? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '榛樿 replace' },
+      },
+      required: ['name', 'text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          chars: { type: 'number' },
+          warning: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `宸插啓鍏ヤ汉鐗╁崱銆?{value.name}銆嶏紙${value.chars} 瀛楋級${value.warning ? `锝?{value.warning}` : ''}` }]
+          : [{ type: 'text', text: `鍐欏叆澶辫触锛?{value.error}` }],
+    },
+    execute: gateTool(async ({ name, text, mode = 'replace' }) => writePerson(name, text, mode)),
+  })
+
+  // 4a) 璁板繂 pin 宸ュ叿锛圓I 閰嶉锛氱紦鍐叉睜 2 娆°€佺敓娲?鐭ヨ瘑鍖?2 娆★紝鍒嗗紑璁★級
+  let aiPinQuotaPool = 2
+  let aiPinQuotaLong = 2
+  defineTool({
+    name: 'hcem_memory_pin',
+    description:
+      '璋冩暣璁板繂閲嶈搴︼紙pinned锛夛細direction=up 鍔?0.5锛宒own 鍑?0.5锛坧inned 鑼冨洿 0~2锛岀紦鍐叉睜 0~1锛夈€? +
+      '缂撳啿姹犻厤棰?2 娆°€佺敓娲?鐭ヨ瘑鍖洪厤棰?2 娆★紙鍒嗗紑璁★紝涓嶈兘璺ㄥ尯浣跨敤锛夈€? +
+      '鐢ㄦ埛鏄庣‘瑕佹眰璁颁綇鎴栦綘纭俊閲嶈鏃?up锛涗綘鍒ゆ柇鏌愭潯宸蹭笉閲嶈/杩囨椂鏃跺彲浠?down锛堝彲鎶垫秷鐢ㄦ埛鎴栬嚜宸辩殑鍒ゆ柇锛夈€? +
+      '浠诲姟绫诲伐浣滆鐢?hcem_work(action=write)锛屼笉瑕侀噸澶?pin銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: '璁板繂 id' },
+        direction: { type: 'string', enum: ['up', 'down'], description: 'up=鍔?0.5锛宒own=鍑?0.5锛涢粯璁?up' },
+      },
+      required: ['id'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          id: { type: 'string' },
+          pinned: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `宸茶皟鏁淬€?{value.id}銆峱inned=${value.pinned}锛堢紦鍐叉睜鍓╀綑 ${aiPinQuotaPool} 娆?/ 鐢熸椿鐭ヨ瘑鍖哄墿浣?${aiPinQuotaLong} 娆★級` }]
+          : [{ type: 'text', text: `pin 澶辫触锛?{value.error}` }],
+    },
+    execute: async ({ id, direction = 'up' }) => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const m = store ? store.getMemory(id) : null
+      if (!m) return { ok: false, id, error: 'not-found' }
+      const isPool = ['context', 'pool_fast', 'pool_observe', 'pool_keep'].includes(m.zone)
+      const isLong = ['life', 'knowledge'].includes(m.zone)
+      if (!isPool && !isLong) return { ok: false, id, error: '鍙兘瀵圭紦鍐叉睜鎴栫敓娲?鐭ヨ瘑鍖虹殑璁板繂璋冩暣 pinned' }
+      const quota = isPool ? aiPinQuotaPool : aiPinQuotaLong
+      if (quota <= 0) {
+        return { ok: false, id, error: isPool ? '缂撳啿姹犵殑 AI pin 閰嶉宸茬敤瀹岋紙2 娆★級' : '鐢熸椿/鐭ヨ瘑鍖虹殑 AI pin 閰嶉宸茬敤瀹岋紙2 娆★級' }
+      }
+      if (isPool) aiPinQuotaPool -= 1
+      else aiPinQuotaLong -= 1
+      const amount = direction === 'down' ? -0.5 : 0.5
+      const pinned = store.addPin(id, amount)
+      return { ok: true, id, pinned: Number(pinned ?? 0) }
+    },
+  })
+
+  // 4b) 宸ヤ綔璁板繂宸ュ叿锛堝喎瀛樺瓙鍒嗗尯锛屾枃浠剁粍锛?
+  defineTool({
+    name: 'hcem_work_write',
+    description:
+      '鎶婄敤鎴蜂氦浠ｇ殑宸ヤ綔璁板叆宸ヤ綔璁板繂锛堟枃浠剁粍锛屼笉鍘嬬缉锛夈€傝褰曞悗璇峰洖澶嶃€屾垜杩欏氨鎶婅繖浜涗簨璁板叆鎴戠殑宸ヤ綔绗旇閲屻€嶃€俶ode=append 杩藉姞锛宺eplace 瑕嗙洊銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '宸ヤ綔绗旇鍚嶏紝濡?璁烘枃鍐欎綔 / 缃戠珯寮€鍙? },
+        text: { type: 'string', description: '宸ヤ綔鍐呭锛圡arkdown锛? },
+        mode: { type: 'string', enum: ['append', 'replace'], description: '榛樿 append' },
+      },
+      required: ['name', 'text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          chars: { type: 'number' },
+          usage: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              chars: { type: 'number' },
+              max: { type: 'number' },
+              ratio: { type: 'number' },
+            },
+            required: ['chars', 'max', 'ratio'],
+          },
+          warning: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [
+              {
+                type: 'text',
+                text: `宸茶鍏ュ伐浣滅瑪璁般€?{value.name}銆嶏紙${value.chars} 瀛楋紝鎬诲崰鐢?${Math.round((value.usage?.ratio ?? 0) * 100)}%锛?{value.warning ? `锝?{value.warning}` : ''}`,
+              },
+            ]
+          : [{ type: 'text', text: `鍐欏叆澶辫触锛?{value.error}` }],
+    },
+    execute: gateTool(async ({ name, text, mode = 'append' }) => writeWork(name, text, mode)),
+  })
+
+  defineTool({
+    name: 'hcem_work_list',
+    description: '鍒楀嚭鎵€鏈夊伐浣滅瑪璁帮紙鏂囦欢鍚嶃€佸瓧鏁般€佹洿鏂版椂闂达級銆?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+                chars: { type: 'number' },
+                updatedAt: { type: 'string' },
+              },
+              required: ['name', 'chars', 'updatedAt'],
+            },
+          },
+        },
+        required: ['ok', 'entries'],
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text:
+            value.entries.length === 0
+              ? '杩樻病鏈夊伐浣滅瑪璁般€?
+              : value.entries.map((e) => `- ${e.name}锛?{e.chars} 瀛楋紝${e.updatedAt.slice(0, 10)}锛塦).join('\n'),
+        },
+      ],
+    },
+    execute: gateTool(async () => ({ ok: true, entries: listWork() })),
+  })
+
+  defineTool({
+    name: 'hcem_work_read',
+    description: '璇诲彇鏌愪釜宸ヤ綔绗旇鐨勫畬鏁村唴瀹广€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', description: '宸ヤ綔绗旇鍚? } },
+      required: ['name'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          name: { type: 'string' },
+          text: { type: 'string' },
+          chars: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: `宸ヤ綔绗旇銆?{value.name}銆嶏細\n${value.text}` }]
+          : [{ type: 'text', text: `璇诲彇澶辫触锛?{value.error}` }],
+    },
+    execute: gateTool(async ({ name }) => readWork(name)),
+  })
+
+  // 4c) 瑙嗚宸ュ叿锛堟闈㈢洃鍚?+ 鐪嬪睆骞曪級
+  defineTool({
+    name: 'hcem_screen_look',
+    description: '鐪嬪綋鍓嶅睆骞曪細鎴浘骞惰瑙嗚妯″瀷锛圦wen2-VL锛夋弿杩扮敾闈㈠唴瀹广€傜敤鎴疯銆岀湅鐪嬫垜鐨勫睆骞?鐪嬩笅杩欎釜銆嶆椂璋冪敤銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        prompt: { type: 'string', description: '鎯崇湅浠€涔堬紙鍙€夛紝榛樿鎻忚堪鐢婚潰锛? },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          text: { type: 'string' },
+          image: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok', 'text'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [{ type: 'text', text: value.text || '锛堢敾闈㈡弿杩颁负绌猴級' }]
+          : [{ type: 'text', text: '鐪嬪睆骞曞け璐ワ細' + (value.error || '鏈煡閿欒') }],
+    },
+    execute: async ({ prompt }) => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const r = await describeScreen({ maxWidth: 1280, prompt })
+      return { ok: !r.error, text: r.text || '', image: r.image || '', error: r.error }
+    },
+  })
+
+  // 寰€鎸囧畾 HCEM 浼氳瘽鍙戜竴鏉℃秷鎭紙鎮诞鐞冭緭鍏ユ璧拌繖閲岋級
+  defineTool({
+    name: 'hcem_send_to_session',
+    description:
+      '鎶婁竴鏉＄敤鎴锋秷鎭€佽繘鎸囧畾鐨?HCEM 浼氳瘽锛堢敤浜庢偓娴悆杈撳叆妗嗭級銆俿essionId 涓嶄紶灏辩敤褰撳墠浼氳瘽銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        sessionId: { type: 'string', description: '鐩爣浼氳瘽 id锛堜笉浼?褰撳墠浼氳瘽锛? },
+        text: { type: 'string', description: '瑕佸彂閫佺殑鏂囨湰' },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          via: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, v) =>
+        v.ok ? [{ type: 'text', text: '宸插彂閫侊紙' + (v.via || '?') + '锛? }] : [{ type: 'text', text: '鍙戦€佸け璐ワ細' + (v.error || '') }],
+    },
+    execute: gateTool(async ({ sessionId, text }) => {
+      const target = sessionId || currentAgent()?.session?.id
+      if (!target) return { ok: false, error: '娌℃湁鐩爣浼氳瘽' }
+      return await sendToSession(target, String(text))
+    }),
+  })
+
+  // 瑙嗗惉璁板繂鎶㈡晳锛氬埌鏈熷墠鐢?AI 鍐冲畾鏁戜笉鏁戯紙涔熷彲鏌ョ敤鎴峰湪鐪嬭棰戞椂鐨勮瘎浠凤級
+  defineTool({
+    name: 'hcem_memory_rescue',
+    description:'瑙嗗惉璁板繂鎶㈡晳涓庣敤鎴疯瘎浠枫€俛ction=list 鍒楀嚭蹇埌鏈熶笖浠峰€间笉澶熺殑瑙嗗惉璁板繂锛沘ction=rescue 鏁戞煇涓€鏉★紙+0.4 鍠滃ソ搴﹀苟寤跺 30 澶╋級锛沘ction=rate 鎶婄敤鎴峰褰撳墠瑙嗛鐨勮瘎浠疯鎴愬垎鏁帮紙鏄庣‘璇村枩娆⑩啋like锛岃涓€鑸啋normal锛岃涓嶅枩娆⑩啋dislike锛涚敤鎴锋病璇勪环灏变笉瑕佽皟鐢紝瑙嗕负寮冩潈锛夈€俽ate 涓嶄紶 id 鏃惰嚜鍔ㄤ綔鐢ㄤ簬鏈€杩?30 鍒嗛挓鍐呯殑瑙嗛璁板繂銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'rescue', 'rate'] },
+        id: { type: 'string', description: 'rescue / rate 鏃剁殑璁板繂 id' },
+        rating: { type: 'string', enum: ['like', 'normal', 'dislike'], description: 'rate 鏃剁殑鐢ㄦ埛璇勪环' },
+        reason: { type: 'string', description: 'rescue 鏃剁殑鐞嗙敱' },
+      },
+      required: ['action'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          items: { type: 'array', items: { type: 'object' } },
+          p0: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) => {
+        if (!value.ok) return [{ type: 'text', text: '澶辫触锛? + (value.error || '鏈煡') }]
+        if (Array.isArray(value.items)) {
+          if (value.items.length === 0) return [{ type: 'text', text: '娌℃湁闇€瑕佹姠鏁戠殑璁板繂銆? }]
+          const lines = value.items.map(
+            (m, i) => `${i + 1}. [${m.leftHours ?? '?'}h 鍚庡埌鏈焆 ${m.summary}锛堝枩濂?${m.p0}锛屼俊鎭噺 ${m.delta0}锛塦,
+          )
+          return [{ type: 'text', text: '寰呮姠鏁戠殑璁板繂锛歕n' + lines.join('\n') }]
+        }
+        return [{ type: 'text', text: `宸插鐞嗭紝褰撳墠鍠滃ソ搴?${value.p0 ?? '?'}` }]
+      },
+    },
+    execute: async ({ action, id, rating, reason }) => {
+      if (!isHcemSession(currentAgent()?.session)) return { ok: false, error: '闈?HCEM 浼氳瘽' }
+      try {
+        if (action === 'list') {
+          return { ok: true, items: listRescueCandidates(store, { limit: 20 }) }
+        }
+        if (action === 'rescue') {
+          const r = rescueMemory(store, id, { by: 'ai', reason })
+          return { ok: r.ok, p0: r.p0, error: r.error }
+        }
+        if (action === 'rate') {
+          const r = rateWhileWatching(store, id, rating || 'normal')
+          return { ok: r.ok, p0: r.p0, error: r.error }
+        }
+        return { ok: false, error: '鏈煡 action' }
+      } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) }
+      }
+    },
+  })
+
+  defineTool({
+    name: 'hcem_video_storyboard',
+    description: '鍒嗘瀽涓€涓棰戞枃浠讹細闀滃ご鍒囧垎 + 浠ｈ〃甯х綉鏍硷紝骞惰瑙嗚妯″瀷姒傛嫭鍐呭锛堥渶瑕?ffmpeg/ffprobe锛夈€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        videoPath: { type: 'string', description: '瑙嗛鏂囦欢缁濆璺緞' },
+        maxCells: { type: 'number', description: '鐩爣鏍兼暟锛?-16锛岄粯璁?9锛屽嵆涔濆鏍硷級' },
+        summary: { type: 'boolean', description: '鏄惁璁╄瑙夋ā鍨嬫鎷唴瀹癸紙榛樿 true锛? },
+      },
+      required: ['videoPath'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          duration: { type: 'number' },
+          segments: { type: 'number' },
+          cuts: { type: 'number' },
+          cells: { type: 'number' },
+          summary: { type: 'string' },
+          frames: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) =>
+        value.ok
+          ? [
+              {
+                type: 'text',
+                text:
+                  `瑙嗛 ${value.duration?.toFixed(1)}s锛?{value.segments} 娈点€?{value.cuts} 涓垏鐐广€?{value.cells} 涓唬琛ㄥ抚` +
+                  (value.summary ? `\n\n${value.summary}` : ''),
+              },
+            ]
+          : [{ type: 'text', text: '鍒嗘瀽澶辫触锛? + (value.error || '鏈煡閿欒') }],
+    },
+    execute: async ({ videoPath, maxCells, summary = true }) => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const safe = safeVideoPath(videoPath)
+      if (!safe.ok) return { ok: false, error: '瑙嗛璺緞涓嶅厑璁革細' + safe.error }
+      // 鍙仛鍒嗛暅锛堜笉鎶藉抚銆佷笉鎻忚堪锛?
+      if (!summary) {
+        const r = await analyzeVideoStoryboard(safe.path, { maxCells })
+        return {
+          ok: r.ok,
+          duration: r.duration,
+          segments: r.segments,
+          cuts: r.cuts,
+          cells: Array.isArray(r.cells) ? r.cells.length : 0,
+          error: r.error,
+        }
+      }
+      // 鍒嗛暅 鈫?鎶藉抚 鈫?鎷煎浘 鈫?瑙嗚妯″瀷姒傛嫭
+      const d = await digestVideo(safe.path, { maxCells })
+      if (!d.ok) return { ok: false, error: d.error, duration: d.duration }
+      return {
+        ok: true,
+        duration: d.duration,
+        segments: d.segments,
+        cuts: d.cuts,
+        cells: d.frames,
+        frames: d.frames,
+        summary: d.summary,
+      }
+    },
+  })
+  
+  // 5) 鐘舵€佸伐鍏凤紙璇荤湡瀹炲瓨鍌級
+  defineTool({
+    name: 'hcem_status',
+    description: '鑾峰彇 HCEM 鎻掍欢褰撳墠鎯呯华鐘舵€侊紙HSL锛夈€佸瓨鍌ㄧ姸鎬佷笌鏁版嵁鐩綍銆?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          H: { type: 'number' },
+          S: { type: 'number' },
+          L: { type: 'number' },
+          store: { type: 'string' },
+          dbPath: { type: 'string' },
+          memoryCount: { type: 'number' },
+          tools: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['ok', 'H', 'S', 'L'],
+      },
+      render(args, value) {
+        const hLabel = value.H === 0 ? '0掳/360掳' : `${value.H}掳`
+        return [
+          {
+            type: 'text',
+            text: `HCEM 鐘舵€侊細H=${hLabel} / S=${value.S}% / L=${value.L}% 锝?瀛樺偍锛?{value.store ?? '鏈氨缁?}锛?{value.dbPath || '-'}锛夛綔 璁板繂 ${value.memoryCount ?? 0} 鏉,
+          },
+        ]
+      },
+    },
+    execute: async () => {
+        // 浼氳瘽闂ㄧ锛氬彧鏈?HCEM 妯″紡鐨勪細璇濇墠鑳借皟鐢?
+        if (!isHcemSession(currentAgent()?.session)) {
+          throw new Error('闈?HCEM 浼氳瘽锛岀姝㈣皟鐢ㄦ宸ュ叿')
+        }
+      const saved = store ? store.getEmotion('global') : null
+      const memories = store ? store.listMemories({ limit: 1000 }) : []
+      // 褰撳墠杩欎釜 agent 瀹為檯鑳界湅鍒扮殑宸ュ叿鍚嶃€?
+      // 鐢ㄦ潵鍥炵瓟銆孒CEM 鍒板簳鏈夋病鏈夋寕涓?DSH 鍘熺敓宸ュ叿銆嶁€斺€?鍒潬妯″瀷鑷堪锛岀湅鏁版嵁銆?
+      let tools = []
+      try {
+        const agent = currentAgent()
+        const reg = agent?.ctx?.tools ?? ctx.tools
+        const list = reg?.schemas?.() ?? reg?.definitions?.() ?? []
+        tools = list.map((t) => t?.name).filter(Boolean).sort()
+      } catch {}
+      return {
+        ok: true,
+        H: saved ? saved.H : state.H,
+        S: saved ? saved.S : state.S,
+        L: saved ? saved.L : state.L,
+        store: store ? 'ready' : 'unavailable',
+        dbPath: store ? DB_PATH : '',
+        memoryCount: memories.length,
+        tools,
+      }
+    },
+  })
+
+  // 鈹€鈹€ 鍚堝苟鍚庣殑 9 涓伐鍏凤紙19 鈫?9锛岀渷绾?55% 宸ュ叿 token锛夆攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // 姣忎釜鍙仛鍒嗗彂锛屽疄鐜板湪涓婇潰鐨?defineTool 閲岋紝搴曞眰 lib 涓€琛屾病鍔ㄣ€?
+
+  // 1) 浜烘牸锛氳鑹插崱 / 鐢ㄦ埛鍗?/ me
+  registerTool({
+    name: 'hcem_profile',
+    description:
+      '浜烘牸鍗＄淮鎶ゃ€倀arget=persona 瑙掕壊鍗★紙浣犺嚜宸辩殑璁惧畾锛? user 鐢ㄦ埛鍗★紙浣犺寰楃殑鐢ㄦ埛淇℃伅锛? me 绗竴浜虹О韬唤鎽樿銆俶ode=replace 鏁存鏇挎崲銆乤ppend 杩藉姞銆乪dit 灞€閮ㄦ敼锛堢敤 find+replace锛宖ind 蹇呴』鍞竴鍖归厤锛宺eplace 涓嶅～=鍒犻櫎锛夈€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        target: { type: 'string', enum: ['persona', 'user', 'me'], description: '榛樿 persona' },
+        mode: { type: 'string', enum: ['replace', 'append', 'edit'], description: '榛樿 replace锛沞dit 鏃剁敤 find/replace' },
+        text: { type: 'string', description: '鏁存鍐呭锛坮eplace/append锛屾垨 target=me锛? },
+        find: { type: 'string', description: 'mode=edit 鏃惰鏇挎崲/鍒犻櫎鐨勭墖娈? },
+        replace: { type: 'string', description: 'mode=edit 鏃剁殑鏇挎崲鏂囧瓧锛涗笉濉?鍒犻櫎' },
+      },
+      required: ['target'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ target = 'persona', mode = 'replace', text, find, replace }) => {
+      if (target === 'me') return toSummary(await impls.hcem_me_edit.execute({ text }))
+      if (mode === 'edit' || find) {
+        return toSummary(
+          await impls.hcem_persona_edit.execute({ find, replace, target: target === 'user' ? 'user' : 'persona' }),
+        )
+      }
+      const impl = target === 'user' ? impls.hcem_user_card_write : impls.hcem_persona_write
+      return toSummary(await impl.execute({ text, mode }))
+    },
+  })
+
+  // 2) 绗旇 路 鏃ヨ
+  registerTool({
+    name: 'hcem_journal',
+    description:
+      '鏃ヨ鏈紙绉佷汉锛屼笉娉ㄥ叆鎻愮ず璇嶏級銆俛ction=list 鍒楀嚭 / read 璇诲叏鏂囷紙瑕?name锛? write 鍐欏叆锛堣 name+text锛宮ode=replace 瑕嗙洊銆乤ppend 杩藉姞锛夈€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'read', 'write'] },
+        name: { type: 'string', description: '鏃ヨ鏍囬锛坮ead/write 蹇呭～锛? },
+        text: { type: 'string', description: '姝ｆ枃锛坵rite 蹇呭～锛孧arkdown锛? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '榛樿 replace' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, name, text, mode = 'replace' }) => {
+      if (action === 'list') return toSummary(await impls.hcem_journal_list.execute({}))
+      if (action === 'read') return toSummary(await impls.hcem_journal_read.execute({ name }))
+      return toSummary(await impls.hcem_journal_write.execute({ name, text, mode }))
+    },
+  })
+
+  // 3) 绗旇 路 浜虹墿
+  registerTool({
+    name: 'hcem_people',
+    description:
+      '浜虹墿鍏崇郴缃戙€俛ction=list 鍒楀嚭 / read 璇绘煇浜哄崱鐗囷紙瑕?name锛? write 鍐欏叆锛堣 name+text锛宮ode=replace 瑕嗙洊銆乤ppend 杩藉姞锛夈€傝仈绯绘柟寮忓彧鍦ㄦ湰鏈猴紝涓嶈涓诲姩澶栨硠銆?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'read', 'write'] },
+        name: { type: 'string', description: '浜虹墿绉板懠锛坮ead/write 蹇呭～锛? },
+        text: { type: 'string', description: '浜虹墿鍗℃鏂囷紙write 蹇呭～锛? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '榛樿 replace' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, name, text, mode = 'replace' }) => {
+      if (action === 'list') return toSummary(await impls.hcem_people_list.execute({}))
+      if (action === 'read') return toSummary(await impls.hcem_people_read.execute({ name }))
+      return toSummary(await impls.hcem_people_write.execute({ name, text, mode }))
+    },
+  })
+
+  // 4) 绗旇 路 宸ヤ綔锛堥粯璁ゅ叧锛岃 TOOL_MOD锛?
+  registerTool({
+    name: 'hcem_work',
+    description:
+      '宸ヤ綔绗旇銆俛ction=list 鍒楀嚭 / read 璇诲叏鏂囷紙瑕?name锛? write 璁板綍锛堣 name+text锛宮ode=append 杩藉姞銆乺eplace 瑕嗙洊锛夈€傝褰曞悗鍥炰竴鍙ャ€屾垜杩欏氨鎶婅繖浜涗簨璁板叆鎴戠殑宸ヤ綔绗旇閲屻€嶃€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'read', 'write'] },
+        name: { type: 'string', description: '绗旇鍚嶏紙read/write 蹇呭～锛? },
+        text: { type: 'string', description: '姝ｆ枃锛坵rite 蹇呭～锛? },
+        mode: { type: 'string', enum: ['replace', 'append'], description: '榛樿 append' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, name, text, mode = 'append' }) => {
+      if (action === 'list') return toSummary(await impls.hcem_work_list.execute({}))
+      if (action === 'read') return toSummary(await impls.hcem_work_read.execute({ name }))
+      return toSummary(await impls.hcem_work_write.execute({ name, text, mode }))
+    },
+  })
+
+  // 5) 璁板繂 路 閲嶈搴?
+  registerTool({
+    name: 'hcem_memory',
+    description: '璋冩暣涓€鏉¤蹇嗙殑閲嶈搴︼紙pinned锛夛細direction=up 鍔?0.5銆乨own 鍑?0.5锛坧inned 鑼冨洿 0~2锛岀紦鍐叉睜 0~1锛夈€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: '璁板繂 id' },
+        direction: { type: 'string', enum: ['up', 'down'], description: '榛樿 up' },
+      },
+      required: ['id'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ id, direction = 'up' }) => toSummary(await impls.hcem_memory_pin.execute({ id, direction })),
+  })
+
+  // 6) 鐘舵€?
+  registerTool({
+    name: 'hcem_status',
+    description: 'HCEM 褰撳墠鐘舵€侊細HSL 鎯呯华銆佸瓨鍌ㄦ槸鍚﹀氨缁€佽蹇嗘潯鏁般€佹暟鎹洰褰曘€?,
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: SUMMARY_OUTPUT,
+    execute: async () => toSummary(await impls.hcem_status.execute({})),
+  })
+
+  // 7) 瑙嗗惉 路 鐪嬶紙灞忓箷 / 瑙嗛 / 瑙嗗惉璁板繂鎶㈡晳 / 鐩戝惉鐘舵€侊級
+  registerTool({
+    name: 'hcem_vision',
+    description:
+      '瑙嗗惉鑳藉姏銆俴ind=screen 鐪嬪綋鍓嶅睆骞曪紙prompt 鍙€夛紝闂綘鎯崇湅浠€涔堬級/ video 鍒嗘瀽瑙嗛鏂囦欢锛堣 videoPath锛? rescue 瑙嗗惉璁板繂鐨勬姠鏁戜笌璇勫垎锛坅ction=list|rescue|rate锛宺ate 鏃?rating=like|normal|dislike锛? status 鏌ヨ妗岄潰鐩戝惉鐘舵€併€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        kind: { type: 'string', enum: ['screen', 'video', 'rescue', 'status'] },
+        prompt: { type: 'string', description: 'kind=screen 鏃舵兂鐪嬩粈涔? },
+        videoPath: { type: 'string', description: 'kind=video 鏃剁殑瑙嗛鏂囦欢璺緞' },
+        maxCells: { type: 'number', description: 'kind=video 鐨勫垎闀滄牸鏁帮紙4-16锛? },
+        summary: { type: 'boolean', description: 'kind=video 鏄惁璁╄瑙夋ā鍨嬫鎷? },
+        action: { type: 'string', enum: ['list', 'rescue', 'rate'], description: 'kind=rescue 鏃剁殑鍔ㄤ綔' },
+        id: { type: 'string', description: 'kind=rescue 鏃剁殑璁板繂 id' },
+        rating: { type: 'string', enum: ['like', 'normal', 'dislike'], description: 'kind=rescue銆乤ction=rate 鏃剁殑璇勪环' },
+        reason: { type: 'string', description: 'kind=rescue銆乤ction=rescue 鏃剁殑鐞嗙敱' },
+      },
+      required: ['kind'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ kind, prompt, videoPath, maxCells, summary, action, id, rating, reason }) => {
+      if (kind === 'screen') return toSummary(await impls.hcem_screen_look.execute({ prompt }))
+      if (kind === 'video') return toSummary(await impls.hcem_video_storyboard.execute({ videoPath, maxCells, summary }))
+      if (kind === 'status') {
+        // screen_status 浠ュ墠鍙湪鎻愮ず璇嶉噷鍑虹幇杩囥€佹病娉ㄥ唽杩囷紱杩欓噷灏卞湴瀹炵幇
+        const s = loadSettings(SETTINGS_PATH)
+        const on = s.listening === true
+        const age = lastScreenAt ? Math.round((Date.now() - lastScreenAt) / 1000) : -1
+        const bits = [`妗岄潰鐩戝惉锛?{on ? '寮€鍚? : '鍏抽棴'}`]
+        bits.push(age >= 0 ? `鏈€杩戠敾闈細${age} 绉掑墠` : '鏈€杩戠敾闈細鏃?)
+        if (lastScreenDesc) bits.push('鐢婚潰鎻忚堪锛? + String(lastScreenDesc).slice(0, 100))
+        return { ok: true, summary: bits.join('锝?) }
+      }
+      return toSummary(await impls.hcem_memory_rescue.execute({ action, id, rating, reason }))
+    },
+  })
+
+  // 8) 瑙嗗惉 路 鍚紙鏂板锛氫富鍔ㄥ綍涓€娈靛苟鍒嗘瀽锛?
+  registerTool({
+    name: 'hcem_listen',
+    description:
+      '涓诲姩鍚竴涓嬪懆鍥达細褰曚竴灏忔锛堥粯璁?5 绉掞紝鏈€澶?15 绉掞級锛岃繑鍥炶浆鍐欐枃鏈?+ 澹伴煶鍒嗙被銆? +
+      'mode=music 鏃舵敼涓哄綍闊充箰鍒嗘瀽锛圔PM/璋冩€?鍜屽鸡/娈佃惤锛夛紝姝ゆ椂绉掓暟鍙粰鍒?10~60锛岃秺闀胯秺鍑嗭紙榛樿 20锛夈€? +
+      'audioPath 缁欎簡灏卞彧鍒嗘瀽閭ｄ釜闊抽/瑙嗛鏂囦欢銆佷笉褰曢煶锛堣棰戜細鑷姩鎶介煶杞級銆? +
+      'videoPath 鏄?audioPath 鐨勫悓涔夊啓娉曪紝涓撶粰瑙嗛鐢ㄣ€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        seconds: { type: 'number', description: '褰曢煶鏃堕暱锛歷oice 妯″紡 1-15锛堥粯璁?5锛夛紱music 妯″紡 10-60锛堥粯璁?20锛? },
+        mode: { type: 'string', enum: ['voice', 'music'], description: 'voice=杞啓鍒嗙被锛堥粯璁わ級锛沵usic=闊充箰鍒嗘瀽' },
+        audioPath: { type: 'string', description: '瑕佸垎鏋愮殑闊抽/瑙嗛鏂囦欢璺緞锛堢粰浜嗗氨涓嶅綍闊筹級' },
+        videoPath: { type: 'string', description: '瑙嗛鏂囦欢璺緞锛堢瓑浠?audioPath锛屼細鎶介煶杞ㄥ啀璇嗗埆锛? },
+      },
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ seconds, mode, audioPath, videoPath } = {}) => {
+      const s = Math.max(1, Math.min(15, Number(seconds) || 5))
+      const wantMusic = mode === 'music'
+      const filePath = videoPath || audioPath
+      try {
+        // 缁欏畾浜嗘枃浠讹細涓嶅綍闊筹紝鐩存帴鍒嗘瀽
+        if (filePath) {
+          const isVideo = /\.(mp4|mkv|mov|avi|webm|flv|m4v|ts|wmv)$/i.test(String(filePath))
+          let target = String(filePath)
+          // 瑙嗛鍏堟娊闊宠建锛歠fmpeg 鈫?16k 鍗曞０閬?wav锛屽悗闈?ASR/闊充箰鍒嗘瀽閮借兘鍚?
+          if (isVideo) {
+            const outWav = join(DATA_DIR, 'audio', `video-${Date.now()}.wav`)
+            mkdirSync(join(DATA_DIR, 'audio'), { recursive: true })
+            target = await extractAudioFromVideo(String(filePath), outWav)
+          }
+          // 闊充箰鍒嗘瀽锛堝惈鎯呮劅锛?
+          if (wantMusic) {
+            const m = await analyzeMusicDeep(target)
+            if (!m.ok) return { ok: false, summary: '闊充箰鍒嗘瀽澶辫触锛? + String(m.error || '') }
+            return { ok: true, summary: (isVideo ? '宸叉娊闊宠建銆? : '') + m.text }
+          }
+          // 浜哄０璇嗗埆锛歈wen3-ASR锛堣嚜甯?VAD 鍒嗘锛岃 lib/audio/asr.mjs锛?
+          const asr = await transcribe(target)
+          if (!asr.ok) return { ok: false, summary: '璇嗗埆澶辫触锛? + String(asr.error || '') }
+          const parts = []
+          if (isVideo) parts.push('宸蹭粠瑙嗛鎶藉嚭闊宠建')
+          const text = String(asr.text || '').trim()
+          parts.push(text ? '鍚埌锛? + text.slice(0, 800) : '锛堟病鏈夎瘑鍒埌浜哄０锛?)
+          // 椤烘墜甯︿竴浠介煶涔愬垎鏋愶紝瑙嗛閲屽父鏈夐厤涔?
+          try {
+            const info = await analyzeMusic(target, { maxSeconds: 60 })
+            if (info.ok && info.kind !== 'speech' && info.text) parts.push('闊充箰锛? + info.text)
+          } catch {}
+          return { ok: true, summary: parts.join('\n') }
+        }
+        // 闊充箰妯″紡锛氬崟鐙綍涓€娈甸暱鐨勫啀鍋氬垎鏋愩€?
+        // 涓嶈蛋 audioTick 鈥斺€?閭ｅ杩樿璺?ASR/鎯呯华/PANNs锛岃 60 绉掞紱
+        // 鑰岄煶涔愬垎鏋愰渶瑕佺殑鏄暱搴︼紝涓嶆槸鏇村妯″瀷銆?
+        if (wantMusic) {
+          const seconds2 = Math.max(10, Math.min(60, Number(seconds) || 20))
+          const m = await recordAndAnalyzeMusic({ dataDir: DATA_DIR, seconds: seconds2 })
+          if (!m.ok) return { ok: false, summary: '闊充箰鍒嗘瀽澶辫触锛? + String(m.error || '') }
+          return { ok: true, summary: `褰曚簡 ${m.seconds} 绉掋€?{m.text}` }
+        }
+        const r = await audioTick({ dataDir: DATA_DIR, seconds: s })
+        const parts = []
+        if (r?.kind || r?.categoryName) parts.push('鍦烘櫙锛? + String(r.categoryName || r.kind))
+        if (r?.text) parts.push('鍚埌锛? + String(r.text).slice(0, 500))
+        if (r?.soundDesc) parts.push(String(r.soundDesc).slice(0, 300))
+        // 鎰熺煡灞傚悗鍙拌窇杩囩殑闊充箰娣卞垎鏋愶紝椤烘墜甯︿笂锛堝彲鑳芥潵鑷渶杩戝嚑鍒嗛挓锛?
+        const info = r?.musicInfo
+        if (info?.ok) parts.push('闊充箰锛? + info.text)
+        return { ok: r?.ok !== false, summary: parts.join('\n') || '锛堟病鍚埌鏄庢樉澹伴煶锛? }
+      } catch (error) {
+        return { ok: false, summary: '褰曢煶澶辫触锛? + String((error && error.message) || error) }
+      }
+    },
+  })
+
+  // 9) 璇达紙鍙戞秷鎭?/ TTS锛?
+  registerTool({
+    name: 'hcem_voice',
+    description:
+      '璇磋瘽 / 閫氳瘽銆俛ction=speak 鐢?TTS 璇翠竴鍙ワ紙瑕?text锛屾部鐢ㄥ綋鍓嶆儏缁姘旓級/ send 鎶婁竴鏉℃秷鎭€佽繘鎸囧畾 HCEM 浼氳瘽锛堣 text锛宻essionId 涓嶅～=褰撳墠浼氳瘽锛? +
+      '/ call_start 寮€濮嬭闊抽€氳瘽锛堜竴鐩村惉锛屽惉鍒板氨绛旓紝鐢ㄦ埛寮€鍙ｄ細鎵撴柇鎾姤锛? call_stop 鎸傛柇 / call_status 鏌ラ€氳瘽鐘舵€併€?,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['speak', 'send', 'call_start', 'call_stop', 'call_status'] },
+        text: { type: 'string', description: '瑕佽/鍙戠殑鍐呭' },
+        sessionId: { type: 'string', description: 'action=send 鐨勭洰鏍囦細璇濓紙鍙€夛級' },
+      },
+      required: ['action'],
+    },
+    output: SUMMARY_OUTPUT,
+    execute: async ({ action, text, sessionId }) => {
+      if (action === 'send') return toSummary(await impls.hcem_send_to_session.execute({ sessionId, text }))
+      if (action === 'call_status') {
+        const s = voiceCall ? voiceCall.status() : { active: false, speaking: false, iterations: 0, bargesIn: 0 }
+        return { ok: true, summary: s.active ? `閫氳瘽涓紙宸插惉 ${s.iterations} 鍙ワ紝鎵撴柇 ${s.bargesIn} 娆?{s.speaking ? '锛屾鍦ㄨ璇? : ''}锛塦 : '娌℃湁鍦ㄩ€氳瘽' }
+      }
+      if (action === 'call_start') {
+        const c = ensureVoiceCall()
+        const r = c.start()
+        return { ok: r.ok !== false, summary: r.already ? '閫氳瘽宸茬粡鍦ㄨ繘琛? : '閫氳瘽宸插紑濮嬶細鎴戜細涓€鐩村惉鐫€锛屼綘璇磋瘽鎴戝氨绛旓紝浣犲紑鍙ｆ垜灏卞仠銆? }
+      }
+      if (action === 'call_stop') {
+        if (!voiceCall) return { ok: true, summary: '鏈潵灏辨病鍦ㄩ€氳瘽' }
+        await voiceCall.stop()
+        return { ok: true, summary: '閫氳瘽宸茬粨鏉熴€? }
+      }
+      try {
+        const e = store?.getEmotion('global') || { H: 360, S: 15, L: 55 }
+        const outPath = join(DATA_DIR, 'tts', 'say-' + Date.now() + '.wav')
+        const r = await speakReply({ text: String(text || ''), H: e.H, S: e.S, L: e.L, outPath, play: true })
+        return r?.ok
+          ? { ok: true, summary: '宸茶锛? + String(text).slice(0, 120) }
+          : { ok: false, summary: 'TTS 澶辫触锛? + String(r?.error || 'unknown') }
+      } catch (error) {
+        return { ok: false, summary: 'TTS 寮傚父锛? + String((error && error.message) || error) }
+      }
+    },
+  })
+
+  // 4) 鍏抽棴鏃舵竻鐞?
+  ctx.effect(
+    () => () => {
+      try {
+        store?.close()
+      } catch {
+        // ignore
+      }
+    },
+    'hcem.store.dispose',
+  )
+}

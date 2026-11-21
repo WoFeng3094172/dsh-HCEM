@@ -1,0 +1,1795 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>HCEM 主菜单 b2311</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: linear-gradient(145deg, #25272e, #15171d);
+    --fg: #e6e8ee;
+    --dim: #8b949e;
+    --cyan: #39d0d8;
+    --blue: #2f81f7;
+    --green: #22c55e;
+    --line: rgba(255, 255, 255, 0.07);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; }
+  body { font: 13px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--fg); }
+
+  #app {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ============ 顶部选项卡 ============ */
+  header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    padding: 16px 22px 18px; flex: 0 0 auto;
+    -webkit-app-region: drag;
+  }
+  .tabs { display: flex; gap: 22px; }
+  .tab {
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
+    background: none; border: none; color: var(--fg); cursor: pointer;
+    font: inherit; font-size: 12px; padding: 0; position: relative;
+    -webkit-app-region: no-drag;
+  }
+  .tab .ic {
+    width: 46px; height: 46px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .2s, transform .2s;
+  }
+  .tab:hover .ic { background: rgba(255, 255, 255, 0.06); }
+  .tab.active .ic { background: rgba(255, 255, 255, 0.09); transform: translateY(-1px); }
+  .tab.active::after {
+    content: ""; position: absolute; bottom: -12px; left: 50%; transform: translateX(-50%);
+    width: 18px; height: 3px; border-radius: 2px; background: var(--blue);
+  }
+  .tab svg { width: 21px; height: 21px; }
+
+  /* ---------- 返回按钮（Uiverse by KINGFRESS：蓝点扩散）---------- */
+  #back {
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: bold; color: white;
+    background-color: #171717;
+    padding: 0.9em 1.6em;
+    border: none; border-radius: .6rem;
+    position: relative; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    line-height: 1; overflow: hidden; contain: paint; isolation: isolate;
+    font-size: 13px; -webkit-app-region: no-drag;
+  }
+  #back span:not(.txt) {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    height: 30px; width: 30px; background-color: #0c66ed;
+    border-radius: 50%; transition: .6s ease;
+    z-index: 0; pointer-events: none;
+  }
+  #back span:nth-of-type(1) { transform: translate(-3.3em, -4em); }
+  #back span:nth-of-type(2) { transform: translate(-6em, 1.3em); }
+  #back span:nth-of-type(3) { transform: translate(-.2em, 1.8em); }
+  #back span:nth-of-type(4) { transform: translate(3.5em, 1.4em); }
+  #back span:nth-of-type(5) { transform: translate(3.5em, -3.8em); }
+  #back:hover span:not(.txt) { transform: translate(-50%, -50%) scale(4); transition: 1.5s ease; }
+  #back .txt {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    gap: 6px; z-index: 2; line-height: 1; white-space: nowrap;
+  }
+  #back .txt svg { display: block; width: 15px; height: 15px; flex-shrink: 0; }
+
+  main { flex: 1; overflow-y: auto; padding: 26px 22px 24px; }
+  main::-webkit-scrollbar { width: 8px; }
+  main::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 4px; }
+  /* 文本域滚动条：跟 UI 深色配色统一（原来默认白色，很扎眼） */
+  textarea::-webkit-scrollbar { width: 10px; }
+  textarea::-webkit-scrollbar-track { background: #15181d; border-radius: 6px; }
+  textarea::-webkit-scrollbar-thumb {
+    background: #2f3742; border-radius: 6px; border: 2px solid #15181d;
+  }
+  textarea::-webkit-scrollbar-thumb:hover { background: #3d4756; }
+  textarea { scrollbar-color: #2f3742 #15181d; scrollbar-width: thin; }
+  .page { display: none; }
+  .page.active { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* ============ 通用面板 ============ */
+  .panel {
+    background:
+      radial-gradient(circle at 50% 0%, rgba(255,255,255,.06), transparent 42%),
+      var(--panel);
+    border-radius: 22px;
+    box-shadow: 0 18px 40px rgba(0,0,0,.4), inset 0 1px 1px rgba(255,255,255,.1);
+    padding: 18px 20px 20px;
+  }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .panel-head h2 { margin: 0; font-size: 16px; font-weight: 900; letter-spacing: .04em; }
+  .panel-head .sub { font-size: 12px; color: var(--dim); }
+
+  /* ---------- 保存按钮（Uiverse：5 点扩散）---------- */
+  .plain-btn { font: inherit; color: #c9d1d9; background: #24263a; border: none; border-radius: 8px; padding: 8px 18px; cursor: pointer; font-weight: 700; }
+  .plain-btn:hover { background: #2d3047; }
+  .save-btn {
+    --dot-color: #0c66ed;
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: bold; color: white;
+    background-color: #24263a;
+    padding: 0.65em 1em; min-width: 88px;
+    border: none; border-radius: 0.5rem;
+    position: relative; cursor: pointer; font-size: 14px;
+    display: inline-flex; align-items: center; justify-content: center;
+    line-height: 1; overflow: hidden; contain: paint; isolation: isolate;
+    transition: background-color .25s ease, transform .1s ease; outline: none;
+  }
+  .save-btn:hover:not(.saved) { background-color: #2d3047; }
+  .save-btn:active:not(.saved) { transform: scale(.96); }
+  .save-btn span:not(:nth-child(6)) {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    height: 30px; width: 30px; background-color: var(--dot-color);
+    border-radius: 50%; transition: .6s ease, background-color .25s ease;
+    z-index: 0; pointer-events: none;
+  }
+  .save-btn span:nth-child(1) { transform: translate(-3.3em, -4em); }
+  .save-btn span:nth-child(2) { transform: translate(-6em, 1.3em); }
+  .save-btn span:nth-child(3) { transform: translate(-.2em, 1.8em); }
+  .save-btn span:nth-child(4) { transform: translate(3.5em, 1.4em); }
+  .save-btn span:nth-child(5) { transform: translate(3.5em, -3.8em); }
+  .save-btn span:nth-child(6) {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    gap: 6px; z-index: 2; line-height: 1; white-space: nowrap;
+  }
+  .save-btn:hover:not(.saved) span:not(:nth-child(6)) {
+    transform: translate(-50%, -50%) scale(4); transition: 1.5s ease;
+  }
+  .save-btn.saved { --dot-color: #10b981; background-color: #064e3b; color: #a7f3d0; pointer-events: none; }
+  .save-btn.saved span:not(:nth-child(6)) { transform: translate(-50%, -50%) scale(4); transition: .4s ease; }
+
+  /* ============ 角色卡页 ============ */
+  .persona-panel textarea {
+    width: 100%; height: 236px; background: #101114;
+    border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
+    color: #e0e0e0; font: inherit; font-size: 14px; line-height: 1.65;
+    padding: 16px 16px 38px; resize: none; outline: none; display: block;
+    transition: border-color .25s, box-shadow .25s;
+  }
+  .persona-panel textarea:focus {
+    border-color: rgba(12,102,237,.6); box-shadow: 0 0 0 3px rgba(12,102,237,.12);
+  }
+  .persona-panel .wrap { position: relative; }
+  .persona-panel .count {
+    position: absolute; right: 16px; bottom: 12px;
+    font-size: 12px; font-weight: 600; color: rgba(255,255,255,.35);
+    font-variant-numeric: tabular-nums; pointer-events: none;
+  }
+  .persona-bottom { display: grid; grid-template-columns: 1fr 180px; gap: 16px; margin-top: 16px; align-items: stretch; }
+
+  /* 性格滑块 */
+  .slider-hint { font-size: 11.5px; color: #6b7280; margin: 0 0 8px 2px; }
+  .slider-group {
+    --c: hsl(194 100% 55%);
+    --thumb: 18px;
+    display: grid;
+    grid-template-columns: 3.2em 1fr 3.2em;
+    grid-template-rows: auto auto auto;
+    column-gap: 12px; align-items: center;
+    margin-bottom: 10px;
+  }
+  .side-label { font-size: 15px; font-weight: 600; color: rgba(220,235,250,.72); white-space: nowrap; }
+  .side-label.left { grid-column: 1; grid-row: 1; text-align: right; }
+  .side-label.right { grid-column: 3; grid-row: 1; text-align: left; }
+  .slider-wrap { grid-column: 2; grid-row: 1; position: relative; height: 26px; transform: scaleX(-1); }
+  .slider-wrap input[type=range] {
+    position: absolute; inset: 0; width: 100%; height: 26px; margin: 0;
+    background: transparent; -webkit-appearance: none; appearance: none; cursor: pointer; outline: none;
+  }
+  .slider-wrap input[type=range]::-webkit-slider-runnable-track {
+    height: 7px; border-radius: 999px; background: var(--c);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.35), 0 0 8px color-mix(in srgb, var(--c) 28%, transparent);
+  }
+  .slider-wrap input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: var(--thumb); height: var(--thumb);
+    margin-top: calc((7px - var(--thumb)) / 2); border-radius: 50%;
+    border: 1px solid rgba(255,255,255,.65);
+    background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.9), transparent 45%), var(--c);
+    box-shadow: 0 0 7px color-mix(in srgb, var(--c) 45%, transparent), 0 4px 8px rgba(0,0,0,.55);
+  }
+  .ticks { grid-column: 2; grid-row: 2; position: relative; height: 4px; margin: -2px 9px 0; pointer-events: none; transform: scaleX(-1); }
+  .tick { position: absolute; top: 0; width: 1px; height: 2px; background: rgba(200,235,255,.2); transform: translateX(-50%); }
+  .tick.major { height: 4px; background: rgba(200,235,255,.45); }
+  .slider-val {
+    grid-column: 2; grid-row: 3; text-align: center; font-size: 15px; font-weight: 900;
+    color: var(--c); font-variant-numeric: tabular-nums; margin-top: 2px;
+    text-shadow: 0 0 6px color-mix(in srgb, var(--c) 40%, transparent);
+  }
+
+  /* 搭话度 */
+  .talk-panel { padding: 16px 14px; }
+  .persona-bottom > .panel { min-height: 180px; display: flex; flex-direction: column; justify-content: center; }
+  .persona-bottom > .panel:not(.talk-panel) { padding-top: 40px; }
+  .talk-panel .panel-head { margin-bottom: 6px; }
+  .talk-panel .panel-head h2 { font-size: 14px; }
+  .radio-container { --total-radio: 3; --c1: #ff6b3d; --c2: #ffb03d; --c3: #3da5ff; position: relative; padding-left: 2px; }
+  .radio-container input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .radio-container input:nth-of-type(1) { --c: var(--c1); }
+  .radio-container input:nth-of-type(2) { --c: var(--c2); }
+  .radio-container input:nth-of-type(3) { --c: var(--c3); }
+  .radio-container .glider-container {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 2px; border-radius: 2px;
+    background: linear-gradient(0deg, rgba(0,0,0,0), rgba(255,255,255,.08) 50%, rgba(0,0,0,0));
+    pointer-events: none; z-index: 0;
+  }
+  .radio-container .glider {
+    position: relative; height: calc(100% / var(--total-radio)); width: 100%; border-radius: 2px;
+    --active-c: var(--c1);
+    background: linear-gradient(0deg, rgba(0,0,0,0) 0%, var(--active-c) 50%, rgba(0,0,0,0) 100%);
+    transition: transform .5s cubic-bezier(.37,1.95,.66,.56), background .35s ease;
+  }
+  .radio-container .glider::before {
+    content: ""; position: absolute; height: 90%; width: 420%; top: 50%; left: 50%;
+    transform: translate(-50%, -50%); background: var(--active-c);
+    filter: blur(16px); opacity: .9; transition: background .35s ease;
+  }
+  /* 长方条光：覆盖选中选项，灯（左）最亮 → 向右渐变透明 */
+  .radio-container .glider::after {
+    content: ""; position: absolute; inset: -4px 0; height: calc(100% + 8px);
+    left: 0; right: 0;
+    background: linear-gradient(90deg, var(--active-c) 0%, color-mix(in srgb, var(--active-c) 45%, transparent) 45%, transparent 100%);
+    opacity: .55; border-radius: 6px; pointer-events: none;
+    transition: background .35s ease;
+  }
+  .radio-container label {
+    cursor: pointer; padding: 24px 8px 24px 16px; position: relative; z-index: 1;
+    color: rgba(200,210,225,.55); font-size: 21px; font-weight: 700; letter-spacing: .06em;
+    border-radius: 10px; display: flex; align-items: center; gap: 8px;
+    transition: color .3s, background-color .3s, text-shadow .3s;
+  }
+  .radio-container label:hover { color: rgba(230,238,248,.85); background: rgba(255,255,255,.03); }
+  .radio-container input:checked + label {
+    color: var(--c);
+    background: linear-gradient(90deg, color-mix(in srgb, var(--c) 22%, transparent) 0%, color-mix(in srgb, var(--c) 6%, transparent) 55%, transparent 100%);
+    text-shadow: 0 0 12px color-mix(in srgb, var(--c) 45%, transparent);
+    box-shadow: inset 0 0 18px color-mix(in srgb, var(--c) 22%, transparent);
+  }
+  .radio-container input:nth-of-type(1):checked ~ .glider-container .glider { transform: translateY(0); --active-c: var(--c1); }
+  .radio-container input:nth-of-type(2):checked ~ .glider-container .glider { transform: translateY(100%); --active-c: var(--c2); }
+  .radio-container input:nth-of-type(3):checked ~ .glider-container .glider { transform: translateY(200%); --active-c: var(--c3); }
+
+  /* ============ 多模态页 ============ */
+  #hcem-toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 20px); background: rgba(220,38,38,.95); color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 700; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 99; }
+  #hcem-toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .multi-panel { position: relative; }
+  #hcem-toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 20px); background: rgba(220,38,38,.95); color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 700; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 99; }
+  #hcem-toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .multi-panel { position: relative; }
+  .multi-wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; z-index: 0; }
+  .multi-panel .mod-row, .multi-panel .check-row { position: relative; z-index: 1; }
+  .multi-wires .wire-bg { fill: none; stroke: rgba(255,255,255,.10); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+  .multi-wires .wire-flow {
+    fill: none; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round;
+    filter: drop-shadow(0 0 7px currentColor);
+  }
+  .multi-wires .wire-dot { fill: none; stroke: rgba(255,255,255,.45); stroke-width: 2; }
+  @keyframes wireflow { 0% { stroke-dashoffset: 1000; } 100% { stroke-dashoffset: 0; } }
+  .check-row .check-text { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .check-row .check-state { font-size: 22px; font-weight: 900; color: var(--green); }
+  .mod-row { display: flex; align-items: center; gap: 14px; padding: 14px 0; position: relative; }
+  .mod-row > .btn-start { flex: 0 0 auto; }
+  .mod-row .name { font-size: 17px; font-weight: 900; letter-spacing: .02em; white-space: nowrap; }
+  .line-slot { flex: 1; min-width: 0; }
+  /* .line-slot 已用 flex:1 撑开，按钮不需要 margin-left:auto（会导致按钮被推出面板被裁） */
+  /* ---------- 音量（音量.txt 原版：喇叭 + 白色进度 + 静音×）---------- */
+  .vol-row { display: flex; align-items: center; gap: 10px; width: 300px; flex: 0 0 auto; }
+  .vol-row .vol-icon {
+    flex: 0 0 auto; width: 22px; height: 22px; display: flex;
+    align-items: center; justify-content: center;
+    color: rgb(150,150,150); cursor: pointer; transition: color .2s;
+  }
+  .vol-row .vol-icon svg { width: 100%; height: 100%; fill: currentColor; }
+  .vol-row .vol-icon:hover, .vol-row.is-muted .vol-icon { color: #fff; }
+  .vol-row .vol-icon .wave { opacity: 1; transition: opacity .2s; }
+  .vol-row .vol-icon .mute { opacity: 0; transition: opacity .2s; }
+  .vol-row.is-muted .vol-icon .wave { opacity: 0; }
+  .vol-row.is-muted .vol-icon .mute { opacity: 1; }
+  .vol-row .vol-level { flex: 1; height: 6px; accent-color: var(--blue); cursor: pointer; outline: none; }
+  .vol-row .vol-value {
+    flex: 0 0 auto; min-width: 2.4em; text-align: right; position: relative; z-index: 2; background: var(--panel-bg, #15171d); padding: 2px 6px; border-radius: 6px;
+    font-variant-numeric: tabular-nums; font-weight: 700; font-size: 15px; color: #c9d1d9;
+  }
+
+  /* ---------- 记忆导入：预打戳加载 ---------- */
+  .imp-stage { display: none; align-items: center; gap: 16px; margin-top: 14px; padding: 14px 16px; background: rgba(47,129,247,.06); border: 1px solid rgba(47,129,247,.25); border-radius: 12px; }
+  .imp-stage.show { display: flex; }
+  .imp-cube { position: relative; width: 34px; height: 34px; flex: 0 0 auto; transform-style: preserve-3d; animation: imp-spin 2.4s linear infinite; }
+  .imp-cube span { position: absolute; inset: 0; background: #2f81f7; opacity: .85; border-radius: 4px; }
+  .imp-cube span:nth-child(1) { transform: translateZ(17px); }
+  .imp-cube span:nth-child(2) { transform: rotateY(90deg) translateZ(17px); background: #3b8ef8; }
+  .imp-cube span:nth-child(3) { transform: rotateY(180deg) translateZ(17px); background: #1f6fe0; }
+  .imp-cube span:nth-child(4) { transform: rotateY(-90deg) translateZ(17px); background: #4f9bff; }
+  @keyframes imp-spin { from { transform: rotateX(-18deg) rotateY(0deg); } to { transform: rotateX(-18deg) rotateY(360deg); } }
+  .imp-text { flex: 1; font-size: 13px; color: #cfe0ff; }
+  .imp-bar { flex: 0 0 220px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.12); overflow: hidden; }
+  .imp-bar i { display: block; height: 100%; width: 0%; border-radius: 3px; background: linear-gradient(90deg, #2f81f7, #4f9bff); transition: width .25s ease; }
+}
+}
+}
+}
+  /* ---------- 检测结果卡片 ---------- */
+  .check-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(.98); width: 420px; max-height: 84vh; overflow: auto; background: #101319; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 16px 18px; box-shadow: 0 26px 60px rgba(0,0,0,.6); z-index: 30; display: none; }
+  .check-card.show { display: block; }
+  .check-card h3 { margin: 0 0 10px; font-size: 15px; }
+  .check-card .row2 { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.06); font-size: 12.5px; }
+  .check-card .row2:last-of-type { border-bottom: none; }
+  .check-card .mark { width: 18px; height: 18px; flex: 0 0 auto; }
+  .check-card .nm { flex: 1; }
+  .check-card .dt { color: #8b93a1; font-size: 11.5px; }
+  .check-card .actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+  /* ---------- 启动按钮（Uiverse by augustin_4687：星星 + 三环）---------- */
+  .btn-start {
+    --stone-50: #fafaf9;
+    --stone-800: #292524;
+    --yellow-400: #facc15;
+    --grad-start: #311FEF;
+    --grad-end: #06E085;
+    --accent-mid: #1C80BA;
+    flex-shrink: 0;
+    font-family: "Rubik", "Segoe UI", sans-serif;
+    cursor: pointer; position: relative;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: bold; line-height: 1; font-size: 13px;
+    border-radius: 1rem; outline: 2px solid transparent; outline-offset: 6px;
+    color: var(--stone-50); background: transparent; border: none;
+    padding: 0;
+  }
+  .btn-start:active { outline-color: var(--yellow-400); }
+  .btn-start:focus-visible { outline-color: var(--yellow-400); outline-style: dashed; }
+  .btn-start::before {
+    content: ""; position: absolute; z-index: 0;
+    height: 200%; max-height: 88px; aspect-ratio: 1; margin: auto;
+    background: var(--yellow-400);
+    clip-path: polygon(100% 50%, 91.48% 56.57%, 97.55% 65.45%, 87.42% 69.07%, 90.45% 79.39%, 79.7% 79.7%, 79.39% 90.45%, 69.07% 87.42%, 65.45% 97.55%, 56.57% 91.48%, 50% 100%, 43.43% 91.48%, 34.55% 97.55%, 30.93% 87.42%, 20.61% 90.45%, 20.3% 79.7%, 9.55% 79.39%, 12.58% 69.07%, 2.45% 65.45%, 8.52% 56.57%, 0% 50%, 8.52% 43.43%, 2.45% 34.55%, 12.58% 30.93%, 9.55% 20.61%, 20.3% 20.3%, 20.61% 9.55%, 30.93% 12.58%, 34.55% 2.45%, 43.43% 8.52%, 50% 0%, 56.57% 8.52%, 65.45% 2.45%, 69.07% 12.58%, 79.39% 9.55%, 79.7% 20.3%, 90.45% 20.61%, 87.42% 30.93%, 97.55% 34.55%, 91.48% 43.43%);
+    animation: star-rotate 4s linear infinite;
+    animation-play-state: paused;
+    opacity: 0.1; transition: opacity 150ms ease;
+  }
+  .btn-start:hover::before { opacity: 1; }
+  .btn-start.is-active::before { animation-play-state: running; opacity: .5; }
+  .btn-start.is-active:hover::before { opacity: 1; }
+  .btn-start > div {
+    padding: 2px; border-radius: 0.75rem;
+    background: linear-gradient(135deg, var(--grad-start), var(--grad-end));
+    transform: translate(0, 0); transition: all 150ms ease;
+    box-shadow:
+      0 0 0 2px var(--stone-800),
+      0 0 0 4px var(--stone-50),
+      0 0 0 6px var(--accent-mid);
+  }
+  .btn-start:hover > div {
+    transform: scale(1.04);
+    box-shadow:
+      0 0 0 2px var(--stone-800),
+      0 0 0 4px var(--stone-50),
+      0 0 0 6px var(--accent-mid),
+      0 0 22px 4px rgba(6, 224, 133, .35);
+  }
+  .btn-start > div > div {
+    position: relative; pointer-events: none;
+    border-radius: calc(0.75rem - 2px); background-color: var(--stone-800);
+  }
+  .btn-start > div > div > div {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    min-width: 118px; padding: .8rem 1.3rem; gap: .25rem;
+    filter: drop-shadow(0 -1px 0 var(--stone-800));
+    text-align: center;
+  }
+  .btn-start > div > div > div:active { transform: translateY(2px); }
+  @keyframes star-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .check-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0 0; }
+  .check-mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 900; }
+  .check-mark.ok { color: var(--green); border: 2px solid var(--green); }
+  .check-mark.bad { color: #ef4444; border: 2px solid #ef4444; }
+  .check-row .name { font-size: 17px; font-weight: 900; }
+  .check-btn-wrap { flex: 0 0 auto; }
+
+  /* ---------- 芯片检测按钮（Uiverse by scissorsdog：SVG 走线）---------- */
+  .chip-button {
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    width: 800px; max-width: 100%; outline: 2px solid transparent; outline-offset: 10px;
+    border-radius: 20px; transition: outline-color .2s; flex: 0 0 auto;
+    margin-left: auto;
+  }
+  .chip-button:focus-visible { outline-color: #00ccff; outline-style: dashed; }
+  .chip-button[aria-busy="true"] { cursor: progress; }
+  .chip-button .loader-svg { width: 100%; height: auto; display: block; pointer-events: none; }
+  .trace-bg { stroke: #4b5563; stroke-width: 4; fill: none; stroke-linejoin: round; }
+  .trace-flow {
+    stroke-width: 6; fill: none; stroke-linecap: round; stroke-linejoin: round;
+    stroke-dasharray: 80 920; stroke-dashoffset: 1000; opacity: 0;
+  }
+  .is-loading .trace-flow { opacity: 1; animation: flow 1.5s linear infinite; }
+  .purple { stroke: #a855f7; color: #a855f7; }
+  .cyan { stroke: #06b6d4; color: #06b6d4; }
+  .yellow { stroke: #eab308; color: #eab308; }
+  .green { stroke: #22c55e; color: #22c55e; }
+  .blue { stroke: #3b82f6; color: #3b82f6; }
+  .red { stroke: #ef4444; color: #ef4444; }
+  .trace-flow { filter: drop-shadow(0 0 6px currentColor); }
+  .chip-text { font-weight: bold; font-size: 26px; fill: #d1d5db; font-family: inherit; user-select: none; letter-spacing: 1px; }
+  .dot-pin { fill: #111827; stroke: #4b5563; stroke-width: 1.5; }
+  .pin { fill: #6b7280; }
+  @keyframes flow { 0% { stroke-dashoffset: 1000; } 100% { stroke-dashoffset: 0; } }
+
+  /* ============ HSL 页 ============ */
+  .hsl-grid { display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: center; }
+  .wheel { position: relative; width: 300px; height: 300px; margin: 0 auto; }
+  .ring {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: conic-gradient(#FFD700, #7CFC00, #00E5FF, #4169E1, #FF00FF, #FF0000, #FFD700);
+    -webkit-mask: radial-gradient(circle, transparent 62%, #000 63%, #000 76%, transparent 77%);
+    mask: radial-gradient(circle, transparent 62%, #000 63%, #000 76%, transparent 77%);
+  }
+  .pointer { position: absolute; inset: 0; border-radius: 50%; transform-origin: 50% 50%; transition: transform .6s cubic-bezier(.3,1.4,.5,1); }
+  .pointer i {
+    position: absolute; left: 50%; top: 6px; width: 13px; height: 13px; margin-left: -6.5px;
+    border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(0,0,0,.55);
+  }
+  .plane-dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 8px rgba(0,0,0,.6); pointer-events: none; z-index: 3; }
+  .plane { position: absolute; left: 50%; top: 50%; width: 170px; height: 170px; transform: translate(-50%,-50%); border-radius: 12px; }
+  .hsl-readout { display: grid; gap: 10px; }
+  .hsl-readout .big { font-size: 46px; font-weight: 900; letter-spacing: -.02em; }
+  .hsl-readout .row { display: flex; justify-content: space-between; padding: 9px 14px; border-radius: 10px; background: rgba(255,255,255,.03); }
+  .hsl-readout .k { color: var(--dim); }
+  .hsl-readout .v { font-variant-numeric: tabular-nums; font-weight: 700; }
+  .hsl-name { font-size: 14px; color: var(--dim); }
+  .meter { height: 6px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; margin-top: 4px; }
+  .meter i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--cyan), var(--blue)); }
+
+  /* ============ 记忆导入页 ============ */
+  .drop-zone {
+    border: 2px dashed rgba(255,255,255,.18); border-radius: 18px;
+    padding: 40px 24px; text-align: center; transition: all .2s; cursor: pointer;
+  }
+  .drop-zone:hover, .drop-zone.over { border-color: var(--blue); background: rgba(47,129,247,.06); }
+  .drop-zone .big { font-size: 16px; font-weight: 800; margin-bottom: 6px; }
+  .drop-zone .small { font-size: 12px; color: var(--dim); }
+  .file-list { margin-top: 16px; display: grid; gap: 8px; }
+  .file-item {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+    border-radius: 12px; background: rgba(255,255,255,.035); font-size: 13px;
+  }
+  .file-item .ico { width: 30px; height: 30px; border-radius: 8px; background: rgba(47,129,247,.18); display: grid; place-items: center; color: #8ab4ff; font-size: 12px; font-weight: 800; }
+  .file-item .meta { margin-left: auto; color: var(--dim); font-size: 12px; }
+  .file-item .rm { background: none; border: none; color: #8b93a7; cursor: pointer; font-size: 16px; }
+
+  /* ============ 日程表页 ============ */
+  .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .cal-head .m { font-size: 17px; font-weight: 900; }
+  .cal-nav { display: flex; gap: 8px; }
+  .cal-nav button { width: 32px; height: 32px; border-radius: 9px; background: rgba(255,255,255,.05); border: 1px solid var(--line); color: var(--fg); cursor: pointer; }
+    .cal-cell.selected { outline: 2px solid var(--blue); outline-offset: -2px; }
+  .cal-cell .cal-mark { position: absolute; top: 5px; right: 6px; width: 7px; height: 7px; border-radius: 50%; }
+  .cal-cell .cal-summary { position: absolute; bottom: 3px; left: 0; right: 0; text-align: center; font-size: 9px; color: var(--dim); padding: 0 2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .sched-editor { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); display: grid; gap: 10px; }
+  .sched-head { font-size: 14px; font-weight: 800; color: var(--fg); }
+  .sched-input { font: inherit; color: var(--fg); background: #0f1115; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px; outline: none; }
+  .sched-input:focus, .sched-full:focus { border-color: rgba(47,129,247,.6); }
+  .sched-full { font: inherit; color: var(--fg); background: #0f1115; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px; min-height: 90px; resize: vertical; outline: none; }
+  .sched-colors { display: flex; align-items: center; gap: 8px; }
+  .sched-label { font-size: 12px; color: var(--dim); }
+  .sched-color { width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent; background: var(--cc); cursor: pointer; padding: 0; }
+  .sched-color.on { border-color: #fff; box-shadow: 0 0 10px var(--cc); }
+  .sched-actions { display: flex; justify-content: flex-end; }  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+  .cal-cell {
+    aspect-ratio: 1.25; border-radius: 10px; background: rgba(255,255,255,.025);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 13px; color: var(--fg); position: relative; cursor: pointer;
+  }
+  .cal-cell.dim { color: #4b5563; }
+  .cal-cell.today { background: rgba(47,129,247,.18); color: #fff; font-weight: 800; }
+  .cal-cell .dotmark { position: absolute; bottom: 6px; width: 4px; height: 4px; border-radius: 50%; background: var(--cyan); }
+  .cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 6px; color: var(--dim); font-size: 11px; text-align: center; }
+
+  /* ============ 设置页 ============ */
+  .set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .set-row:last-child { border-bottom: none; }
+  .set-row .t { font-size: 14px; font-weight: 600; }
+  .set-row .d { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .switch { position: relative; width: 46px; height: 26px; flex: 0 0 auto; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; background: #2a2f38; border-radius: 999px; transition: .2s; cursor: pointer; }
+  .switch span::before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #8b93a7; border-radius: 50%; transition: .2s; }
+  .switch input:checked + span { background: #1f4d3a; }
+  .switch input:checked + span::before { transform: translateX(20px); background: #4ade80; }
+  .range-line { width: 300px; }
+  .range-line input { width: 100%; accent-color: var(--blue); }
+
+  /* ============ 警告卡片（Uiverse by eslam-hany：hover 展开）============ */
+  #warn-mask {
+    position: absolute; inset: 0; z-index: 30;
+    display: none; align-items: center; justify-content: center; flex-direction: column; gap: 20px;
+    background: rgba(5, 8, 12, .5); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    -webkit-app-region: no-drag;
+  }
+  #warn-mask.show { display: flex; }
+  .warn-card {
+    position: relative;
+    width: 300px; height: 400px;
+    background: mediumturquoise;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 25px; font-weight: bold;
+    border-radius: 15px; cursor: pointer; overflow: hidden;
+    color: #0b1a20;
+  }
+  .warn-card::before, .warn-card::after {
+    position: absolute; content: ""; width: 20%; height: 20%;
+    background-color: lightblue; transition: all .5s; z-index: 1;
+  }
+  .warn-card::before { top: 0; right: 0; border-radius: 0 15px 0 100%; }
+  .warn-card::after { bottom: 0; left: 0; border-radius: 0 100% 0 15px; }
+  .warn-card:hover::before, .warn-card:hover::after,
+  .warn-card.expanded::before, .warn-card.expanded::after { width: 100%; height: 100%; border-radius: 15px; }
+  .warn-card .label {
+    position: relative; z-index: 2; letter-spacing: .1em; transition: opacity .25s;
+  }
+  .warn-card:hover .label, .warn-card.expanded .label { opacity: 0; }
+  .warn-card .warning {
+    position: absolute; inset: 0; z-index: 2; padding: 18px 16px;
+    display: flex; flex-direction: column; justify-content: center;
+    color: #0b1a20; font-size: 10.5px; font-weight: normal; line-height: 1.45;
+    opacity: 0; pointer-events: none; transition: opacity .35s .15s;
+  }
+  .warn-card:hover .warning, .warn-card.expanded .warning { opacity: 1; }
+  .warn-card .warning h3 { margin: 0 0 2px; text-align: center; font-size: 13px; font-weight: bold; letter-spacing: .2em; }
+  .warn-card .warning h3 .warn-icon { color: #e6a700; margin-right: 4px; letter-spacing: 0; -webkit-text-stroke: .4px #7a5600; }
+  .warn-card .warning .divider { text-align: center; font-size: 10px; line-height: 1.1; margin: 2px 0 6px; white-space: nowrap; letter-spacing: -1px; }
+  .warn-card .warning ol { margin: 0; padding-left: 1.3em; text-align: left; }
+  .warn-card .warning li { margin-bottom: 3px; }
+  .warn-card .warning .note { margin: 0; text-align: center; font-weight: bold; }
+  .warn-card .warning .divider.bottom { margin: 6px 0 4px; }
+
+  /* ---------- Consent 按钮（Uiverse by Gaurav-WebDev：翻转）---------- */
+  .consent {
+    height: 50px; width: 150px;
+    border: none; border-radius: 10px; cursor: pointer;
+    position: relative; overflow: hidden;
+    transition: all .5s ease-in-out; background: transparent; padding: 0;
+  }
+  .consent:hover { box-shadow: .5px .5px 150px #252525; }
+  .consent::after {
+    content: "Thanks"; height: 50px; width: 150px;
+    background-color: #008080; color: #fff;
+    position: absolute; top: 0; left: 0; transform: translateY(50px);
+    font-size: 1.2rem; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .5s ease-in-out;
+  }
+  .consent::before {
+    content: "Consent"; height: 50px; width: 150px;
+    background-color: #fff; color: #008080;
+    position: absolute; top: 0; left: 0; transform: translateY(0px) scale(1.2);
+    font-size: 1.2rem; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .5s ease-in-out;
+  }
+  .consent:hover::after { transform: translateY(0) scale(1.2); }
+  .consent:hover::before { transform: translateY(-50px) scale(0) rotate(120deg); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="tabs" id="tabs"></div>
+    <button id="back">
+      <span></span><span></span><span></span><span></span><span></span>
+      <span class="txt">返回
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+      </span>
+    </button>
+  </header>
+  <main id="pages"></main>
+
+  <div id="warn-mask">
+    <div class="warn-card expanded" id="warn-card">
+      <span class="label">HCEM</span>
+      <div class="warning">
+        <h3><span class="warn-icon">⚠</span>警告</h3>
+        <div class="divider">——————</div>
+        <ol>
+          <li>HCEM的设计目标是“陪伴”，会话中AI的情绪与记忆会模糊，故不适用于严谨的工作场景。</li>
+          <li>AI会遗忘，遗忘是设计的一部分，这不是BUG。</li>
+          <li>AI情绪极化时可能会出现轻度幻觉，这正是“像人”的代价。</li>
+          <li>痛苦安全阀不可移除！安全阀是HCEM的底线！</li>
+          <li>隐私数据全部保存于本地data/目录，不会上传任何服务器，敏感内容请用户自行保管。</li>
+        </ol>
+        <div class="divider bottom">————————————</div>
+        <p class="note">使用HCEM，<br>即视用户为同意自行承担风险。</p>
+      </div>
+    </div>
+    <button class="consent" id="consent" aria-label="同意"></button>
+  </div>
+</div>
+
+<script>
+const api = window.hcem || null
+const TABS = [
+  { id: 'persona', name: '角色卡', icon: 'M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-5 0-9 2.5-9 5.5V22h18v-2.5c0-3-4-5.5-9-5.5Z' },
+  { id: 'import', name: '记忆导入', icon: 'M11 3h2v10.6l3.3-3.3 1.4 1.4L12 18l-5.7-5.7 1.4-1.4 3.3 3.3V3ZM4 19h16v2H4v-2Z' },
+  { id: 'hsl', name: 'HSL引擎', icon: 'M12 2a10 10 0 1 0 0 20 2 2 0 0 0 2-2c0-.5-.2-1-.5-1.4-.3-.4-.5-.8-.5-1.3 0-1 .8-1.8 1.8-1.8H17a5 5 0 0 0 5-5C22 6.1 17.5 2 12 2Z' },
+  { id: 'multi', name: '多模态', icon: 'M12 2 2 8l10 6 10-6-10-6Zm0 8.5L5 6.5 12 4l7 2.5-7 2.5ZM2 12l10 6 10-6-2-1.2-8 4.8-8-4.8L2 12Z' },
+  { id: 'settings', name: '设置', icon: 'M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.74 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.14.24.42.32.61.22l2.39-.96c.49.37 1.03.7 1.62.94l.36 2.54c.04.26.25.42.5.42h3.84c.25 0 .46-.16.5-.42l.36-2.54c.59-.24 1.13-.57 1.62-.94l2.39.96c.19.1.47.02.61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2Z' },
+]
+const MODS = [
+  ['vision', '视觉常驻'],
+  ['audio-watch', '听觉常驻'],
+  ['voice-out', '语音输出'],
+  ['voice-in', '语音输入'],
+  ['local-route', '本地分流'],
+]
+document.addEventListener('contextmenu', (e) => e.preventDefault())
+
+const state = {
+  current: 'multi',
+  // vision 是合并后的按钮，实际写进 mods.json 的仍是 desktop + video 两个键
+  mods: { ...Object.fromEntries(MODS.map(([id]) => [id, false])), 'desk-watch': false, 'video-watch': false },
+  persona: '',
+  talk: 0,
+  sliders: { warmth: 0, tolerance: 0, optimism: 0 },
+  h: 0, s: 15, l: 55,
+  selectedDay: new Date().getDate(),
+  schedColor: 'red',
+  volume: 60,
+  volMuted: false,
+  checking: false,
+  checkFail: false,
+  classifier: false,
+}
+try {
+  const saved = JSON.parse(localStorage.getItem('hcem-ui-state') || 'null')
+  if (saved) {
+    Object.assign(state, saved)
+    // 旧存档没有 vision 键：用 desk-watch / video-watch 兜底迁移
+    if (!state.mods) state.mods = {}
+    if (state.mods.vision === undefined) {
+      state.mods.vision = Boolean(state.mods['desk-watch'] || state.mods['video-watch'])
+    }
+    state.mods['desk-watch'] = Boolean(state.mods.vision)
+    state.mods['video-watch'] = Boolean(state.mods.vision)
+    // 运行时状态不能从存档恢复：checking 一旦被存成 true，
+    // 检测按钮会在 onclick 第一行就 return（表现就是"点了没反应"）。实测踩过。
+    state.checking = false
+    state.checkFail = false
+  }
+} catch {}
+
+/* ---------- 性格 / 搭话度 → 影响 HSL 系统的基准值 ----------
+ * HSL 系统本身有一组默认基准（HSL_SYSTEM_BASE）。
+ * 三个性格轴 + 搭话度只改变这个基准的偏移：
+ *   - 用户可把三轴拖到 ±5
+ *   - AI 随成长可把它写到 ±15（外部 set_sliders 写入，不受滑块范围限制）
+ */
+const HSL_SYSTEM_BASE = { h: 0, s: 15, l: 55 } // 逻辑色相 0 = 黄（快乐）
+
+function clampNum(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
+
+  /**
+   * 色彩平衡（与插件侧 emotion.mjs 的 colorBalance 同一算法）
+   * 三轴互补色：温和度 红↔青 / 包容度 绿↔洋红 / 乐观度 黄↔蓝
+   * 二次衰减权重：距目标色越近推得越用力，单轴最大 ±12°
+   */
+  function colorBalanceJs(baseHue, sliders, maxDeg = 12) {
+    const axes = [
+      { value: Number(sliders.warmth || 0), pos: 300, neg: 120 },
+      { value: Number(sliders.tolerance || 0), pos: 60, neg: 240 },
+      { value: Number(sliders.optimism || 0), pos: 0, neg: 180 },
+    ]
+    const norm = (x) => ((x % 360) + 360) % 360
+    const circ = (a, b) => {
+      const d = Math.abs(norm(a) - norm(b))
+      return Math.min(d, 360 - d)
+    }
+    let h = norm(baseHue)
+    for (const ax of axes) {
+      const v = Math.max(-5, Math.min(5, ax.value)) / 5
+      if (v === 0) continue
+      const target = v > 0 ? ax.pos : ax.neg
+      const dist = circ(h, target)
+      const weight = Math.pow(1 - dist / 180, 2)
+      if (weight <= 0) continue
+      const dir = ((target - h + 540) % 360) - 180
+      if (dir === 0) continue
+      const move = Math.sign(dir) * Math.min(Math.abs(dir), Math.abs(v) * maxDeg * weight)
+      h = norm(h + move)
+    }
+    return h
+  }
+
+  function computeHSLBase() {
+    const w = Number(state.sliders.warmth || 0)
+    const t = Number(state.sliders.tolerance || 0)
+    const o = Number(state.sliders.optimism || 0)
+    const talk = Number(state.talk || 0)
+    // 话痨 / 好奇 / 安静 → 饱和度与明度偏移
+    const talkAdj = [[8, 3], [3, 1], [-6, -3]][talk] || [0, 0]
+
+    // 色相：走色彩平衡（不是简单的「乐观度 × 2」）
+    const h = colorBalanceJs(HSL_SYSTEM_BASE.h, { warmth: w, tolerance: t, optimism: o }, 12)
+    const s = clampNum(HSL_SYSTEM_BASE.s + w * 0.45 - t * 0.15 + talkAdj[0] * 0.6, 3, 100)
+    const l = clampNum(HSL_SYSTEM_BASE.l + w * 0.15 + t * 0.08 + o * 0.12 + talkAdj[1] * 0.5, 10, 90)
+    return { h, s, l }
+  }
+
+/** 把这个偏移后的基准交给 HSL 系统，并让悬浮球按它上色 */
+function applyBaseToHSL() {
+  const b = computeHSLBase()
+  state.h = b.h
+  state.s = b.s
+  state.l = b.l
+  if (state.current === 'hsl') drawHSL()
+  // ① 推给插件：这就是 HSL 系统的基准
+  tauriInvoke('set_hsl', { h: b.h, s: b.s, l: b.l, base: true }).catch(() => {})
+  // ② 悬浮球按当前值上色
+}
+const $ = (id) => document.getElementById(id)
+const params = new URLSearchParams(location.search)
+// 气泡（主动说话）插件端点：档位 / 「DSH 后台不搭话」都走这里，与 DSH 状态栏按钮共用同一个字段
+const BUBBLE_ROUTE = 'http://127.0.0.1:8097/bubble'
+// 草稿：拖动/点击只改这些，点保存才写回 state 并生效
+state.draftSliders = Object.assign({}, state.sliders)
+state.draftTalk = state.talk
+function svg(d) { return `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${d}"/></svg>` }
+function persist() {
+  try {
+    // 只存用户设置，不存运行时状态（checking 之类的临时标记会把按钮卡死）
+    const { checking, checkFail, ...rest } = state
+    localStorage.setItem('hcem-ui-state', JSON.stringify(rest))
+  } catch {}
+}
+function saveBtn(label = '保存') {
+  return `<button class="save-btn"><span></span><span></span><span></span><span></span><span></span><span>${label}</span></button>`
+}
+
+/**
+ * 显存让位后，插件把「被踢掉的开关」推过来（Rust eval 调用这里），
+ * 按钮要跟着关掉，否则会出现「按钮显示运行中、模型其实已经停了」。
+ */
+window.applyMods = function (mods) {
+  if (!mods || typeof mods !== 'object') return
+  const read = (id) => {
+    const v = mods[id]
+    if (v && typeof v === 'object' && typeof v.enabled === 'boolean') return v.enabled
+    return typeof v === 'boolean' ? v : undefined
+  }
+  // 桌面 + 视频 → vision（菜单里视觉是一个按钮）
+  const deskOn = read('desktop')
+  const videoOn = read('video')
+  if (deskOn !== undefined || videoOn !== undefined) {
+    const on = Boolean(deskOn) || Boolean(videoOn)
+    state.mods.vision = on
+    state.mods['desk-watch'] = on
+    state.mods['video-watch'] = on
+  }
+  for (const id of ['audio', 'voiceIn', 'voiceOut', 'localRoute']) {
+    const v = read(id)
+    if (v !== undefined) state.mods[id] = v
+  }
+  persist()
+  document.querySelectorAll('.mod-row [data-mod]').forEach((btn) => {
+    const mid = btn.dataset.mod
+    const on = Boolean(state.mods[mid])
+    btn.classList.toggle('is-active', on)
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false')
+    const label = btn.querySelector('div > div > div')
+    if (label) label.textContent = on ? '运行中' : '启动'
+  })
+}
+
+/* ---------- 选项卡 ---------- */
+function renderTabs() {
+  const el = $('tabs')
+  el.innerHTML = TABS.map((t) => `
+    <button class="tab ${t.id === state.current ? 'active' : ''}" data-id="${t.id}">
+      <span class="ic">${svg(t.icon)}</span>${t.name}
+    </button>`).join('')
+  el.querySelectorAll('.tab').forEach((b) => (b.onclick = () => switchPage(b.dataset.id)))
+}
+
+/* ---------- 页面 ---------- */
+function pagePersona() {
+  return `
+    <div class="panel persona-panel">
+      <div class="panel-head">
+        <h2>角色卡</h2>
+        <span id="save-persona-slot">${saveBtn('保存')}</span>
+      </div>
+      <div class="wrap">
+        <textarea id="persona-text" placeholder="在此输入角色设定…">${state.persona}</textarea>
+        <div class="count" id="persona-count">000 字</div>
+      </div>
+    </div>
+
+    <div class="persona-bottom">
+      <div class="panel">
+        
+        <div class="slider-hint">用户可调 ±5 · AI 随成长可到 ±15</div>
+        <div id="sliders"></div>
+      </div>
+      <div class="panel talk-panel">
+        
+        <div class="radio-container">
+          <input type="radio" name="tone" id="tone-1" ${state.talk === 0 ? 'checked' : ''}><label for="tone-1">话痨</label>
+          <input type="radio" name="tone" id="tone-2" ${state.talk === 1 ? 'checked' : ''}><label for="tone-2">好奇</label>
+          <input type="radio" name="tone" id="tone-3" ${state.talk === 2 ? 'checked' : ''}><label for="tone-3">安静</label>
+          <div class="glider-container"><div class="glider"></div></div>
+        </div>
+      </div>
+    </div>`
+}
+
+function sliderRows() {
+  const defs = [
+    ['warmth', '热情', '冷漠'],
+    ['tolerance', '宽容', '挑剔'],
+    ['optimism', '乐观', '悲观'],
+  ]
+  return defs.map(([k, l, r]) => `
+    <div class="slider-group" data-k="${k}">
+      <span class="side-label left">${l}</span>
+      <div class="slider-wrap"><input type="range" min="-15" max="15" step="1" data-user-max="5" value="${state.sliders[k] || 0}" aria-label="${l}-${r}"></div>
+      <span class="side-label right">${r}</span>
+      <div class="ticks"></div>
+      <output class="slider-val">0</output>
+    </div>`).join('')
+}
+
+function pageImport() {
+  return `
+    <div class="panel">
+      <div class="panel-head"><h2>记忆导入</h2><span class="sub">复制到 data/reincarnation/ 并预打戳</span></div>
+      <div class="drop-zone" id="drop">
+        <div class="big">拖入记忆文件</div>
+        <div class="small">拖进来就会复制到 data/reincarnation/ 并开始预打戳</div>
+      </div>
+      <div class="imp-stage" id="imp-stage">
+        <div class="imp-cube"><span></span><span></span><span></span><span></span></div>
+        <div class="imp-text" id="imp-text">正在预打戳…</div>
+        <div class="imp-bar"><i id="imp-bar"></i></div>
+      </div>
+      <div class="file-list" id="file-list"></div>
+    </div>`
+}
+
+function pageHSL() {
+  return `
+    <div class="panel">
+      <div class="panel-head"><h2>HSL 引擎</h2><span class="sub">情绪色相 · 饱和度 · 明度</span></div>
+      <div class="hsl-grid">
+        <div class="wheel">
+          <div class="ring"></div>
+          <div class="pointer" id="hsl-pointer"><i></i></div>
+          <canvas class="plane" id="hsl-plane" width="170" height="170"></canvas>
+          <div class="plane-dot" id="hsl-dot"></div>
+        </div>
+        <div class="hsl-readout">
+          <div class="big" id="hsl-big">H 0°</div>
+          <div class="hsl-name" id="hsl-name">快乐</div>
+          <div class="row"><span class="k">饱和度 S</span><span class="v" id="hsl-s">15%</span></div>
+          <div class="meter"><i id="hsl-s-bar" style="width:15%"></i></div>
+          <div class="row"><span class="k">明度 L</span><span class="v" id="hsl-l">55%</span></div>
+          <div class="meter"><i id="hsl-l-bar" style="width:55%"></i></div>
+        </div>
+      </div>
+    </div>`
+}
+
+function pageSchedule() {
+  const now = new Date()
+  const y = now.getFullYear(), m = now.getMonth()
+  const first = new Date(y, m, 1)
+  const startDow = (first.getDay() + 6) % 7
+  const days = new Date(y, m + 1, 0).getDate()
+  const prevDays = new Date(y, m, 0).getDate()
+  // 数据存储需求（接系统控制时实现）：
+  //   schedule: [{ date:'YYYY-MM-DD', summary:'概括', full:'全文', color:'red|orange|blue|green|purple' }]
+  //   存储位置：data/schedule.json（或 SQLite data/schedule.db）
+  const schedule = window.__schedule || (window.__schedule = [])
+  let cells = ''
+  for (let i = startDow - 1; i >= 0; i--) cells += `<div class="cal-cell dim">${prevDays - i}</div>`
+  for (let d = 1; d <= days; d++) {
+    const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    const item = schedule.find((s) => s.date === dateStr)
+    const today = d === now.getDate() ? 'today' : ''
+    const isSel = d === state.selectedDay ? 'selected' : ''
+    const mark = item
+      ? `<span class="cal-mark" style="background:${item.color}"></span><span class="cal-summary">${item.summary.slice(0, 4)}</span>`
+      : ''
+    cells += `<div class="cal-cell ${today} ${isSel}" data-day="${d}">${d}${mark}</div>`
+  }
+  const selDate = `${y}-${String(m + 1).padStart(2, '0')}-${String(state.selectedDay).padStart(2, '0')}`
+  const selItem = schedule.find((s) => s.date === selDate)
+  const colors = [
+    ['red', '#ef4444'], ['orange', '#f97316'], ['blue', '#3b82f6'],
+    ['green', '#22c55e'], ['purple', '#a855f7'],
+  ]
+  return `
+    <div class="panel">
+      <div class="cal-head">
+        <div class="m">${y} 年 ${m + 1} 月</div>
+        <div class="cal-nav"><button>‹</button><button>›</button></div>
+      </div>
+      <div class="cal-week"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
+      <div class="cal-grid">${cells}</div>
+
+      <div class="sched-editor">
+        <div class="sched-head">${m + 1} 月 ${state.selectedDay} 日 · 日程</div>
+        <input class="sched-input" id="sched-summary" placeholder="概括（一句话）" value="${selItem ? selItem.summary : ''}">
+        <textarea class="sched-full" id="sched-full" placeholder="全文（详细内容）">${selItem ? selItem.full : ''}</textarea>
+        <div class="sched-colors">
+          <span class="sched-label">颜色标记</span>
+          ${colors.map(([n, c]) => `<button class="sched-color ${state.schedColor === n ? 'on' : ''}" data-color="${n}" style="--cc:${c}"></button>`).join('')}
+        </div>
+        <div class="sched-actions">
+          <button class="plain-btn" id="sched-add">添加</button>
+        </div>
+      </div>
+    </div>`
+}
+
+function startButton(id, on, labels) {
+  const onTxt = labels?.on || '运行中'
+  const offTxt = labels?.off || '启动'
+  return `
+    <button class="btn-start ${on ? 'is-active' : ''}" data-mod="${id}" aria-pressed="${on}">
+      <div><div><div>${on ? onTxt : offTxt}</div></div></div>
+    </button>`
+}
+
+function pageMulti() {
+  const rows = MODS.map(([id, name]) => {
+    const on = state.mods[id]
+    return `<div class="mod-row"><div class="name">${name}</div><div class="line-slot"></div>${startButton(id, on)}</div>`
+  }).join('')
+
+  return `
+    <div class="panel multi-panel">
+      <svg class="multi-wires" id="wire-svg"></svg>
+      ${rows}
+      <div class="check-row">
+        <div class="check-text">
+          <div class="name">模型检测</div>
+        </div>
+        <span class="check-btn-anchor" id="check-btn">${startButton('check', state.mods.check, { on: '检测中', off: '检测' })}</span>
+      </div>
+    </div>`
+}
+  // 接收插件推来的实时 HSL（桥接帧 STATE）
+  // 防止死循环：插件推 STATE → applyHSL → drawHSL → set_hsl → 插件 → STATE …
+  let suppressHslPush = false
+  window.applyHSL = (h, s, l) => {
+    if (typeof state === 'undefined') return
+    suppressHslPush = true
+    state.h = h
+    state.s = s
+    state.l = l
+    try { if (typeof drawHSL === 'function') drawHSL() } catch (e) {}
+    suppressHslPush = false
+  }
+
+function pageSettings() {
+  return `
+    <div class="panel">
+      <div class="panel-head"><h2>设置</h2></div>
+      <div class="set-row">
+        <div><div class="t">插件启动</div><div class="d">关闭后 HCEM 不读记忆、不用情绪、不调用任何工具</div></div>
+        <label class="switch"><input type="checkbox" id="plugin-enabled"><span></span></label>
+      </div>
+      <div class="set-row">
+        <div><div class="t">热菜助理 Commis</div><div class="d">默认关。它不回答问题，只把工具按顺序摆到你手边（重排检索结果）；没有模型时不影响任何行为</div></div>
+        <label class="switch"><input type="checkbox" id="classifier-enabled"><span></span></label>
+      </div>
+      <div class="set-row">
+        <div><div class="t">悬浮球大小</div><div class="d">0.5 ~ 2.0 倍</div></div>
+        <div class="range-line"><input id="orb-scale" type="range" min="0.5" max="2" step="0.1" value="${state.orbScale ?? 1}"></div>
+      </div>
+      <div class="set-row">
+        <div><div class="t">悬浮球常驻置顶</div><div class="d">始终显示在其他窗口之上</div></div>
+        <label class="switch"><input type="checkbox" checked><span></span></label>
+      </div>
+      <div class="set-row">
+        <div><div class="t">DSH 后台不搭话</div><div class="d">DSH 窗口在后台（最小化或切到别的应用）时不主动搭话</div></div>
+        <label class="switch"><input type="checkbox" id="bubble-focus" checked><span></span></label>
+      </div>
+      <div class="set-row">
+        <div><div class="t">开机自启</div><div class="d">随系统启动 HCEM</div></div>
+        <label class="switch"><input type="checkbox"><span></span></label>
+      </div>
+      <div class="set-row">
+        <div><div class="t">语音输出音量</div><div class="d">TTS 播放音量</div></div>
+        <div class="vol-row ${state.volMuted ? 'is-muted' : ''}" id="vol-wrap">
+          <span class="vol-value" id="vol-value">${state.volume ?? 60}</span>
+          <div class="vol-icon" id="vol-btn" role="button" tabindex="0" aria-label="切换静音">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path d="M3 9v6h4l5 5V4L7 9H3z"/>
+              <path class="wave" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+              <path class="wave" d="M14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+              <g class="mute" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <line x1="17" y1="9" x2="23" y2="15"></line>
+                <line x1="23" y1="9" x2="17" y2="15"></line>
+              </g>
+            </svg>
+          </div>
+          <input class="vol-level" id="vol-level" type="range" min="0" max="100" value="${state.volume ?? 60}">
+        </div>
+      </div>
+      <div class="set-row">
+        <div><div class="t">数据目录</div><div class="d">安装目录下的 data/</div></div>
+        <button class="plain-btn" id="open-dir-slot">打开</button>
+      </div>
+      <div class="set-row">
+        <div><div class="t">版本</div><div class="d">HCEM 0.0.3.1 · Tauri</div></div>
+        <span class="sub">关于</span>
+      </div>
+    </div>`
+}
+
+const PAGES = {
+  persona: pagePersona,
+  import: pageImport,
+  hsl: pageHSL,
+  schedule: pageSchedule,
+  multi: pageMulti,
+  settings: pageSettings,
+}
+
+function renderPages() {
+  $('pages').innerHTML = TABS.map((t) => `
+    <section class="page ${t.id === state.current ? 'active' : ''}" id="page-${t.id}">${PAGES[t.id]()}</section>`).join('')
+}
+
+/* ---------- 草稿 → 生效（点「保存」时才执行） ---------- */
+function applyDraft() {
+  if (state.draftSliders) Object.assign(state.sliders, state.draftSliders)
+  if (typeof state.draftTalk === 'number') state.talk = state.draftTalk
+  persist()
+  tauriInvoke('ui_cmd', { cmd: 'set_sliders', data: Object.assign({}, state.sliders) }).catch(() => {})
+  tauriInvoke('ui_cmd', { cmd: 'set_talk', data: { talk: state.talk } }).catch(() => {})
+  tauriInvoke('write_persona', { text: state.persona || '' }).catch(() => {})
+  applyBaseToHSL()
+}
+
+/* ---------- 绑定 ---------- */
+function bindPage() {
+  const id = state.current
+
+  // 日历：点日选中、颜色、添加
+  document.querySelectorAll('.cal-cell[data-day]').forEach((cell) => {
+    cell.onclick = () => {
+      state.selectedDay = Number(cell.dataset.day)
+      persist()
+      renderPages()
+      bindPage()
+    }
+  })
+  document.querySelectorAll('.sched-color').forEach((b) => {
+    b.onclick = () => {
+      state.schedColor = b.dataset.color
+      persist()
+      renderPages()
+      bindPage()
+    }
+  })
+  const addBtn = $('sched-add')
+  if (addBtn) {
+    addBtn.onclick = () => {
+      const now = new Date()
+      const y = now.getFullYear(), m = now.getMonth()
+      const dateStr = y + '-' + String(m + 1).padStart(2, '0') + '-' + String(state.selectedDay).padStart(2, '0')
+      const summary = ($('sched-summary').value || '').trim()
+      const full = ($('sched-full').value || '').trim()
+      if (!summary && !full) return
+      const arr = window.__schedule || (window.__schedule = [])
+      const idx = arr.findIndex((s) => s.date === dateStr)
+      const item = { date: dateStr, summary: summary || full.slice(0, 8), full, color: state.schedColor }
+      if (idx >= 0) arr[idx] = item
+      else arr.push(item)
+      tauriInvoke('ui_cmd', { cmd: 'add_schedule', data: item }).catch(() => {})
+      renderPages()
+      bindPage()
+    }
+  }
+
+  // 角色卡 / 用户卡：直读插件用的同一份文件，避免菜单和 AI 看到的内容不一致
+  tauriInvoke('read_persona')
+    .then((txt) => {
+      if (typeof txt === 'string' && txt.length >= 0) {
+        state.persona = txt
+        const ta = $('persona-text')
+        if (ta && document.activeElement !== ta) ta.value = txt
+      }
+    })
+    .catch(() => {})
+  tauriInvoke('read_user_card')
+    .then((txt) => {
+      if (typeof txt === 'string') {
+        const ta = $('user-card-text')
+        if (ta && document.activeElement !== ta) ta.value = txt
+      }
+    })
+    .catch(() => {})
+
+  // 设置：工具分类头（默认关）
+  const clsSw = $('classifier-enabled')
+  if (clsSw) {
+    clsSw.checked = !!state.classifier
+    clsSw.onchange = () => {
+      state.classifier = clsSw.checked
+      persist()
+      tauriInvoke('ui_cmd', { cmd: 'set_classifier', data: { enabled: state.classifier } }).catch(() => {})
+    }
+  }
+
+  // 设置：插件总开关
+  const pluginSw = $('plugin-enabled')
+  if (pluginSw) {
+    tauriInvoke('get_enabled')
+      .then((on) => { pluginSw.checked = on === true })
+      .catch(() => {})
+    pluginSw.onchange = async () => {
+      const on = pluginSw.checked
+      try {
+        await tauriInvoke('set_enabled', { enabled: on })
+      } catch (e) {
+        pluginSw.checked = !on
+      }
+    }
+  }
+
+  // 设置：DSH 后台不搭话（气泡的聚焦门）
+  const bubbleFocus = $('bubble-focus')
+  if (bubbleFocus) {
+    fetch(BUBBLE_ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        if (r && r.ok) bubbleFocus.checked = r.requireFocus !== false
+      })
+      .catch(() => {})
+    bubbleFocus.onchange = async () => {
+      const want = bubbleFocus.checked
+      try {
+        const res = await fetch(BUBBLE_ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ requireFocus: want }),
+        })
+        if (!res.ok) bubbleFocus.checked = !want
+      } catch (e) {
+        bubbleFocus.checked = !want
+      }
+    }
+  }
+
+  // 设置：打开数据目录
+  const openDir = $('open-dir-slot')
+  if (openDir) {
+    openDir.onclick = () => { tauriInvoke('open_data_dir').catch(() => {}) }
+  }
+
+  // 设置：悬浮球大小
+  const orbScale = $('orb-scale')
+  if (orbScale) {
+    orbScale.oninput = () => {
+      state.orbScale = Number(orbScale.value)
+      persist()
+      tauriInvoke('set_orb_scale', { scale: state.orbScale }).catch(() => {})
+    }
+    tauriInvoke('set_orb_scale', { scale: state.orbScale ?? 1 }).catch(() => {})
+  }
+
+  // 音量：拖动 + 喇叭静音切换（音量.txt 原版逻辑）
+  const volBtn = $('vol-btn')
+  const volLevel = $('vol-level')
+  const volWrap = $('vol-wrap')
+  const volVal = $('vol-value')
+  if (volBtn && volLevel) {
+    const paint = () => {
+      const v = Number(volLevel.value)
+      state.volume = v
+      if (v === 0) {
+        state.volMuted = true
+        volWrap.classList.add('is-muted')
+      } else {
+        state.volMuted = false
+        volWrap.classList.remove('is-muted')
+        state.lastVolume = v
+      }
+      if (volVal) volVal.textContent = v
+      persist()
+      tauriInvoke('ui_cmd', { cmd: 'set_volume', data: { volume: v } }).catch(() => {})
+    }
+    volLevel.oninput = paint
+    volBtn.onclick = () => {
+      const cur = Number(volLevel.value)
+      volLevel.value = cur === 0 ? (state.lastVolume || 60) : 0
+      paint()
+    }
+    paint()
+  }
+
+  /** 点「保存」后：把草稿写回 state，推给插件，并让 HSL 基准生效 */
+
+
+  // 所有保存按钮：点击后蓝点扩散 + 变绿
+  document.querySelectorAll('.save-btn').forEach((btn) => {
+    btn.onclick = () => {
+      // 角色卡页：保存时把草稿生效并同步给插件
+      if (btn.closest('#save-persona-slot')) applyDraft()
+      if (btn.classList.contains('saved')) return
+      const textEl = btn.querySelector('span:nth-child(6)')
+      const old = textEl.textContent
+      btn.classList.add('saved')
+      textEl.textContent = '已保存'
+      setTimeout(() => {
+        btn.classList.remove('saved')
+        textEl.textContent = old
+      }, 1500)
+    }
+  })
+
+  if (id === 'persona') {
+    const ta = $('persona-text')
+    const count = $('persona-count')
+    const update = () => {
+      state.persona = ta.value
+      count.textContent = String(ta.value.length).padStart(3, '0') + ' 字'
+      persist()
+    }
+    ta.oninput = update
+    update()
+
+    const container = $('sliders')
+    container.innerHTML = sliderRows()
+    container.querySelectorAll('.slider-group').forEach((group) => {
+      const k = group.dataset.k
+      const input = group.querySelector('input')
+      const ticks = group.querySelector('.ticks')
+      const out = group.querySelector('.slider-val')
+      const reversed = k === 'tolerance'
+      for (let i = 0; i <= 30; i++) {
+        const t = document.createElement('span')
+        t.className = 'tick' + (i % 5 === 0 ? ' major' : '')
+        t.style.left = (i / 30 * 100) + '%'
+        ticks.appendChild(t)
+      }
+      const paint = () => {
+        // 条是完整的 -15..15，但用户手动只能拖到 ±5；
+        // AI 成长时由外部写入更大值（直接改 state，不经这里）。
+        const USER_MAX = 5
+        let v = Number(input.value)
+        if (Math.abs(v) > USER_MAX) {
+          v = v > 0 ? USER_MAX : -USER_MAX
+          input.value = v
+        }
+        let hue
+        if (reversed) hue = v <= 0 ? ((v + 15) / 15) * 150 : 150 + (v / 15) * 50
+        else hue = v <= 0 ? 200 - ((v + 15) / 15) * 50 : 150 - (v / 15) * 150
+        group.style.setProperty('--c', `hsl(${hue} 100% 55%)`)
+        out.textContent = v > 0 ? '+' + v : String(v)
+        // 只改草稿：点「保存」后才真正生效
+        state.draftSliders = state.draftSliders || {}
+        state.draftSliders[k] = v
+      }
+      input.oninput = paint
+      paint()
+    })
+
+    document.querySelectorAll('input[name=tone]').forEach((r) => {
+      r.onchange = () => {
+        // 搭话度也只改草稿
+        state.draftTalk = ['tone-1', 'tone-2', 'tone-3'].indexOf(r.id)
+      }
+    })
+  }
+
+  if (id === 'import') {
+    const drop = $('drop')
+    const list = $('file-list')
+    const files = []
+    const render = () => {
+      list.innerHTML = files.map((f, i) => `
+        <div class="file-item">
+          <span class="ico">${(f.name.split('.').pop() || '?').toUpperCase().slice(0, 3)}</span>
+          <span>${f.name}</span>
+          <span class="meta">${(f.size / 1024).toFixed(1)} KB</span>
+          <button class="rm" data-i="${i}">×</button>
+        </div>`).join('')
+      list.querySelectorAll('.rm').forEach((b) => (b.onclick = () => { files.splice(+b.dataset.i, 1); render() }))
+    }
+    drop.onclick = () => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.multiple = true
+      input.onchange = () => {
+        for (const f of input.files) files.push(f)
+        render()
+      }
+      input.click()
+    }
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over') }
+    drop.ondragleave = () => drop.classList.remove('over')
+    drop.ondrop = (e) => {
+      e.preventDefault()
+      drop.classList.remove('over')
+      for (const f of e.dataTransfer.files) files.push(f)
+      render()
+    }
+  }
+
+  if (id === 'hsl') drawHSL()
+
+  if (id === 'multi') {
+    const panel = document.querySelector('.multi-panel')
+    if (panel) {
+      const WIRE_COLORS = ['#a855f7', '#06b6d4', '#eab308', '#f97316', '#3b82f6', '#ef4444', '#22c55e']
+
+      const syncFlows = () => {
+        panel.querySelectorAll('.mod-row').forEach((row) => {
+          const btn = row.querySelector('[data-mod]')
+          if (!btn) return
+          const flow = row.__flow
+          if (!flow) return
+          flow.style.display = state.mods[btn.dataset.mod] ? '' : 'none'
+        })
+      }
+
+      const buildWires = () => {
+        const svg = $('wire-svg')
+        const anchor = $('check-btn')
+        if (!svg || !anchor) return
+        const pr = panel.getBoundingClientRect()
+        const br = anchor.getBoundingClientRect()
+        if (!pr.width || !br.width) return
+        svg.setAttribute('viewBox', `0 0 ${Math.round(pr.width)} ${Math.round(pr.height)}`)
+        svg.setAttribute('preserveAspectRatio', 'none')
+        const tx = br.left - pr.left - 6
+        const ty = br.top - pr.top + br.height / 2
+        const rows = [...panel.querySelectorAll('.mod-row'), panel.querySelector('.check-row')].filter(Boolean)
+        svg.innerHTML = ''
+        rows.forEach((row, i) => {
+          const nameEl = row.querySelector('.name')
+          if (!nameEl) return
+          const vol = row.querySelector('.vol-row')
+          let sr
+          if (vol) {
+            sr = vol.getBoundingClientRect()
+          } else {
+            const range = document.createRange()
+            range.selectNodeContents(nameEl)
+            sr = range.getBoundingClientRect()
+          }
+          const sx = Math.min(sr.right - pr.left + 12, tx - 14)
+          const sy = sr.top - pr.top + sr.height / 2
+          const isCheckRow = row.classList.contains('check-row')
+          // 通道从右往左排（越靠上的行通道越靠右），这样竖向段不会与下方行的横线交叉
+          const chX = isCheckRow ? tx - 150 : tx - 18 - i * 16
+          // 汇入按钮的横线错开高度（都落在按钮中线上方，避免与检测行横线重叠）
+          const finY = isCheckRow ? ty : ty - 32 + i * 3
+          const d = isCheckRow
+            ? `M ${sx.toFixed(1)} ${sy.toFixed(1)} L ${sx.toFixed(1)} ${ty.toFixed(1)} L ${tx.toFixed(1)} ${ty.toFixed(1)}`
+            : `M ${sx.toFixed(1)} ${sy.toFixed(1)} L ${chX.toFixed(1)} ${sy.toFixed(1)} L ${chX.toFixed(1)} ${finY.toFixed(1)} L ${tx.toFixed(1)} ${finY.toFixed(1)}`
+          const color = WIRE_COLORS[i % WIRE_COLORS.length]
+          const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+          let inner = `<path class="wire-bg" d="${d}" /><circle class="wire-dot" cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="5" />`
+          if (!isCheckRow) {
+            inner += `<path class="wire-flow" d="${d}" stroke="${color}" style="display:none" />`
+          }
+          g.innerHTML = inner
+          svg.appendChild(g)
+          const flow = g.querySelector('.wire-flow')
+          if (flow) {
+            const len = flow.getTotalLength()
+            const dash = Math.max(26, Math.min(54, len * 0.05))
+            flow.style.strokeDasharray = `${dash} ${Math.max(1, len - dash)}`
+            row.__flow = flow
+            const anim = document.createElementNS('http://www.w3.org/2000/svg', 'animate')
+            anim.setAttribute('attributeName', 'stroke-dashoffset')
+            anim.setAttribute('from', String(len))
+            anim.setAttribute('to', '0')
+            anim.setAttribute('dur', `${Math.max(1.6, len / 140).toFixed(2)}s`)
+            anim.setAttribute('repeatCount', 'indefinite')
+            flow.appendChild(anim)
+          }
+        })
+        syncFlows()
+      }
+
+      buildWires()
+      requestAnimationFrame(buildWires)
+      window.addEventListener('resize', buildWires, { once: true })
+
+      document.querySelectorAll('.mod-row [data-mod]').forEach((btn) => {
+        btn.onclick = () => {
+          const mid = btn.dataset.mod
+          state.mods[mid] = !state.mods[mid]
+          // 「视觉常驻」同时驱动桌面监视 + 视频监视（后端仍按这两个键判断）
+          if (mid === 'vision') {
+            state.mods['desk-watch'] = state.mods.vision
+            state.mods['video-watch'] = state.mods.vision
+          }
+          btn.classList.toggle('is-active', state.mods[mid])
+          btn.setAttribute('aria-pressed', state.mods[mid] ? 'true' : 'false')
+          btn.querySelector('div > div > div').textContent = state.mods[mid] ? '运行中' : '启动'
+          persist()
+          syncFlows()
+          // 开关状态同步给插件（命名管道 CMD set_mods）
+          tauriInvoke('set_mods', { mods: state.mods }).catch(() => {})
+        }
+      })
+
+      const checkBtn = panel.querySelector('[data-mod="check"]')
+      if (checkBtn) {
+        checkBtn.onclick = async () => {
+          try { tauriInvoke('dbg_click', { what: 'check-click' }).catch(() => {}) } catch {}
+          if (state.checking) return
+          state.checking = true
+          checkBtn.classList.add('is-active')
+          checkBtn.querySelector('div > div > div').textContent = '检测中'
+          // 检测只报告状态，不启动模型（模型由「本地分流」开关控制）
+          let items = []
+          try {
+            items = await tauriInvoke('check_services')
+          } catch (e) {
+            items = [{ name: '检测调用失败', state: 'off', detail: String(e) }]
+          }
+          if (!Array.isArray(items) || !items.length) items = [{ name: '无检测结果', state: 'off', detail: '' }]
+          state.checking = false
+          checkBtn.classList.remove('is-active')
+          checkBtn.querySelector('div > div > div').textContent = '检测'
+          // 只有「不可用」才算异常；「就绪但开关没开」是正常状态
+          const allOk = items.every((i) => i.state !== 'off')
+          showCheckCard(items, allOk)
+        }
+      }
+    }
+  }
+
+  /* ---------- 记忆导入：拖放 → 复制到 reincarnation ---------- */
+  if (id === 'import') {
+    const stage = $('imp-stage')
+    const bar = $('imp-bar')
+    const text = $('imp-text')
+    const list = $('file-list')
+    const run = async (paths) => {
+      if (!paths || !paths.length || !stage) return
+      stage.classList.add('show')
+      if (bar) bar.style.width = '12%'
+      if (text) text.textContent = '正在复制并预打戳…'
+      let res = []
+      try { res = await tauriInvoke('import_memory', { paths }) } catch (e) { res = [] }
+      let p = 12
+      const timer = setInterval(() => {
+        p = Math.min(90, p + 8)
+        if (bar) bar.style.width = p + '%'
+      }, 130)
+      setTimeout(() => {
+        clearInterval(timer)
+        if (bar) bar.style.width = '100%'
+        const okCount = res.filter((r) => r.ok).length
+        if (text) text.textContent = okCount ? ('已导入 ' + okCount + ' 个文件，开始预打戳') : '导入失败'
+        if (list && res.length) {
+          list.innerHTML = res.map((r) => '<div class="file-item">' + (r.ok ? '✓' : '✗') + ' ' + r.name + ' <span class="dt">' + (r.ok ? (Math.round(r.size / 1024) + ' KB') : r.detail) + '</span></div>').join('')
+        }
+        setTimeout(() => stage.classList.remove('show'), 1500)
+      }, 900)
+    }
+    window.__hcemImport = run
+    if (window.__TAURI__ && window.__TAURI__.event && !window.__hcemDropBound) {
+      window.__hcemDropBound = true
+      window.__TAURI__.event.listen('tauri://drag-drop', (e) => {
+        const paths = (e && e.payload && e.payload.paths) || []
+        if (window.__hcemImport) window.__hcemImport(paths)
+      })
+    }
+    const drop = $('drop')
+    if (drop) {
+      drop.onclick = () => {
+        if (text) text.textContent = '把文件拖进窗口即可'
+        if (stage) stage.classList.add('show')
+      }
+    }
+  }
+
+/* ---------- 检测结果卡片 ---------- */
+}
+
+function showCheckCard(items, allOk) {
+  let el = document.getElementById('hcem-check-card')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'hcem-check-card'
+    // 直接内联样式：不依赖 .check-card 类（避免样式表被其它规则带偏）
+    el.style.cssText = [
+      'position:fixed', 'left:50%', 'top:50%', 'transform:translate(-50%,-50%)',
+      'width:420px', 'max-height:80vh', 'overflow:auto',
+      'background:#101319', 'border:1px solid rgba(255,255,255,.14)',
+      'border-radius:14px', 'padding:16px 18px',
+      'box-shadow:0 26px 60px rgba(0,0,0,.65)', 'z-index:9999', 'display:none',
+      'font:13px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif', 'color:#e6e8ee'
+    ].join(';')
+    document.body.appendChild(el)
+  }
+  // 三态：on=运行中 / idle=就绪但开关没开 / off=不可用
+  const MARKS = {
+    on: { glyph: '✓', color: '#4ade80' },
+    idle: { glyph: '○', color: '#6b7280' },
+    off: { glyph: '✗', color: '#f87171' },
+  }
+  const row = (it) => {
+    const m = MARKS[it.state] || MARKS.off
+    return (
+      '<div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06)">' +
+      '<span style="width:14px;flex:0 0 auto;text-align:center;font-size:13px;line-height:1;color:' + m.color + '">' + m.glyph + '</span>' +
+      '<span style="flex:0 0 auto;min-width:104px;font-size:12.5px">' + it.name + '</span>' +
+      '<span style="flex:1;text-align:right;color:#8b93a1;font-size:11.5px">' + (it.detail || '') + '</span>' +
+      '</div>'
+    )
+  }
+  const onCount = items.filter((i) => i.state === 'on').length
+  el.innerHTML =
+    '<div style="font-weight:700;font-size:15px;margin:0 0 10px">模型检测 · ' + (allOk ? '正常' : '异常') + '</div>' +
+    items.map(row).join('') +
+    '<div style="margin-top:10px;color:#8b93a1;font-size:11px;line-height:1.6">✓ 运行中 ' + onCount + ' 项 ｜ ○ 就绪但未启用 ｜ ✗ 不可用</div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-top:12px"><button id="hcem-check-close" style="font:inherit;font-size:12.5px;padding:6px 16px;border-radius:8px;border:1px solid rgba(255,255,255,.18);background:#1b2130;color:#e6e8ee;cursor:pointer">关闭</button></div>'
+  el.style.display = 'block'
+}
+
+
+/* ---------- 检测卡片：关闭（事件委托，innerHTML 重建也不丢） ---------- */
+document.addEventListener('click', (e) => {
+  const t = e.target
+  if (t && (t.id === 'hcem-check-close' || t.closest?.('#hcem-check-close'))) {
+    const el = document.getElementById('hcem-check-card')
+    if (el) el.style.display = 'none'
+    e.preventDefault()
+    e.stopPropagation()
+  }
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const el = document.getElementById('hcem-check-card')
+    if (el) el.style.display = 'none'
+  }
+})
+
+/* ---------- 简易提示 ---------- */
+function showToast(msg) {
+  let el = document.getElementById('hcem-toast')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'hcem-toast'
+    document.body.appendChild(el)
+  }
+  el.textContent = msg
+  el.classList.add('show')
+  clearTimeout(el.__t)
+  el.__t = setTimeout(() => el.classList.remove('show'), 3600)
+}
+/* ---------- HSL 绘制 ---------- */
+function hslToRgb(h, s, l) {
+  s /= 100; l /= 100
+  const c = (1 - Math.abs(2 * l - 1)) * s
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = l - c / 2
+  let r = 0, g = 0, b = 0
+  if (h < 60) [r, g, b] = [c, x, 0]
+  else if (h < 120) [r, g, b] = [x, c, 0]
+  else if (h < 180) [r, g, b] = [0, c, x]
+  else if (h < 240) [r, g, b] = [0, x, c]
+  else if (h < 300) [r, g, b] = [x, 0, c]
+  else [r, g, b] = [c, 0, x]
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
+}
+const EMOTIONS = [[0, '快乐'], [60, '惊讶'], [120, '恐惧'], [180, '悲伤'], [240, '厌恶'], [300, '愤怒']]
+function nearestName(H) {
+  let best = EMOTIONS[0], bestD = 999
+  for (const e of EMOTIONS) {
+    const d = Math.min(Math.abs(H - e[0]), 360 - Math.abs(H - e[0]))
+    if (d < bestD) { bestD = d; best = e }
+  }
+  return best[1]
+}
+function drawHSL() {
+  const canvas = $('hsl-plane')
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  const w = canvas.width, h = canvas.height
+  const img = ctx.createImageData(w, h)
+  for (let y = 0; y < h; y++) {
+    const L = (1 - y / (h - 1)) * 100
+    for (let x = 0; x < w; x++) {
+      const S = (x / (w - 1)) * 100
+      // HCEM 色相定义：H=0° 是黄（不是标准 HSL 的红），整体偏移 60°
+      const [r, g, b] = hslToRgb((state.h + 60) % 360, S, L)
+      const i = (y * w + x) * 4
+      img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = b; img.data[i + 3] = 255
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+  const p = $('hsl-pointer')
+  if (p) p.style.transform = `rotate(${state.h}deg)`
+  // H 跟色环走（色环上的纯色相，S=100 L=55）
+  const hueColor = `hsl(${(state.h + 60) % 360} 100% 55%)`
+  // S 跟方框走（方框里的绿：色相固定，按 S 变化）
+  const sColor = `hsl(${(state.h + 60) % 360} ${Math.max(20, state.s)}% 50%)`
+  // L 跟黑白明度走（纯灰阶）
+  const lColor = `hsl(0 0% ${Math.round(state.l)}%)`
+  const big = $('hsl-big'); if (big) { big.textContent = `H ${Math.round(state.h)}°`; big.style.color = hueColor }
+  const nm = $('hsl-name'); if (nm) nm.textContent = nearestName(state.h)
+  const sEl = $('hsl-s'); if (sEl) sEl.textContent = Math.round(state.s) + '%'
+  const lEl = $('hsl-l'); if (lEl) lEl.textContent = Math.round(state.l) + '%'
+  const sBar = $('hsl-s-bar'); if (sBar) { sBar.style.width = state.s + '%'; sBar.style.background = sColor }
+  const lBar = $('hsl-l-bar'); if (lBar) { lBar.style.width = state.l + '%'; lBar.style.background = lColor }
+  // 把 HSL 推给悬浮球（颜色一致）
+  if (typeof suppressHslPush === 'undefined' || !suppressHslPush) {
+    tauriInvoke('set_hsl', { h: state.h, s: state.s, l: state.l }).catch(() => {})
+  }
+  // 方框里的点（S 横向、L 纵向；限制在 0-100）
+  const dot = $('hsl-dot')
+  if (dot) {
+    const sx = Math.max(0, Math.min(100, state.s))
+    const ly = Math.max(0, Math.min(100, state.l))
+    dot.style.left = (65 + (sx / 100) * 170) + 'px'
+    dot.style.top = (65 + ((100 - ly) / 100) * 170) + 'px'
+    dot.style.background = hueColor
+  }
+}
+
+/* ---------- 切换 / 警告 ---------- */
+function switchPage(id) {
+  if (id === state.current) return
+  state.current = id
+  renderTabs()
+  renderPages()
+  bindPage()
+  persist()
+  const active = document.querySelector('.page.active')
+  if (active) active.style.animation = 'fade .22s ease'
+  // fitWindow() 已停用：窗口尺寸随用户拖动固定
+}
+
+/* ---------- 窗口尺寸跟随页面内容 ---------- */
+function tauriInvoke(cmd, args) {
+  const t = window.__TAURI__
+  if (t?.core?.invoke) return t.core.invoke(cmd, args || {})
+  return Promise.reject(new Error('no tauri'))
+}
+let fitTimer = null
+function fitWindow() {
+  clearTimeout(fitTimer)
+  fitTimer = setTimeout(() => {
+    const header = document.querySelector('header')
+    const page = document.querySelector('.page.active')
+    if (!header || !page) return
+    const h = Math.ceil(header.offsetHeight + page.scrollHeight + 22)
+    // 已停用：窗口尺寸固定为用户拖动的尺寸
+  }, 30)
+}
+
+$('back').onclick = () => {
+  const t = window.__TAURI__
+  if (t?.core?.invoke) t.core.invoke('close_menu').catch(() => {})
+  else if (api?.closeMenu) api.closeMenu()
+  else window.parent?.postMessage({ type: 'hcem:close-menu' }, '*')
+}
+
+function showWarning() {
+  if (params.get('nointro') === '1') return
+  if (localStorage.getItem('hcem-consent') === '1') return
+  $('warn-mask').classList.add('show')
+}
+$('consent').onclick = () => {
+  localStorage.setItem('hcem-consent', '1')
+  $('warn-mask').classList.remove('show')
+}
+
+/* ---------- 状态 ---------- */
+function applyState(s) {
+  if (!s) return
+  // 兼容两种字段名：本地状态用大写 H/S/L，桥接帧（pipe-server → Rust）用小写 h/s/l。
+  // 以前只认大写，于是 STATE 推过来的值全被丢掉——这就是"HSL 读数不跟系统动"的另一半。
+  const H = typeof s.H === 'number' ? s.H : typeof s.h === 'number' ? s.h : null
+  const S = typeof s.S === 'number' ? s.S : typeof s.s === 'number' ? s.s : null
+  const L = typeof s.L === 'number' ? s.L : typeof s.l === 'number' ? s.l : null
+  if (H !== null) state.h = H
+  if (S !== null) state.s = S
+  if (L !== null) state.l = L
+  if (state.current === 'hsl') drawHSL()
+}
+
+if (params.get('page') && PAGES[params.get('page')]) state.current = params.get('page')
+
+renderTabs()
+renderPages()
+bindPage()
+showWarning()
+applyBaseToHSL()   // 用性格/搭话度算出 HSL 基准
+  // fitWindow() 已停用：窗口尺寸随用户拖动固定
+
+if (api?.onState) api.onState(applyState)
+api?.getState?.().then(applyState).catch(() => {})
+
+/* ---------- 搭话度双向同步 ----------
+ * DSH 状态栏的「冒泡」按钮改档位后，这里要跟着变。
+ * 用户有未保存草稿时（draftTalk ≠ talk）不覆盖，免得把人家正在选的东西冲掉。
+ */
+async function syncClassifierFromPlugin() {
+  try {
+    const r = await fetch('http://127.0.0.1:8097/classifier', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    if (!r.ok) return
+    const j = await r.json()
+    if (typeof j?.enabled === 'boolean') {
+      state.classifier = j.enabled
+      persist()
+      const t = document.getElementById('classifier-enabled')
+      if (t) t.checked = j.enabled
+    }
+  } catch {}
+}
+
+async function syncTalkFromPlugin() {
+  try {
+    // 顺手对齐开关：显存让位后插件会把某些开关关掉，菜单重开时要显示真实状态
+    try {
+      const mr = await fetch('http://127.0.0.1:8097/mods', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      if (mr.ok) {
+        const mj = await mr.json()
+        if (mj?.mods) window.applyMods?.(mj.mods)
+      }
+    } catch {}
+    const res = await fetch(BUBBLE_ROUTE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    if (!res.ok) return
+    const r = await res.json()
+    const t = Number(r?.talk)
+    if (!Number.isFinite(t)) return
+    if (t === Number(state.talk)) return
+    if (Number(state.draftTalk) !== Number(state.talk)) return
+    state.talk = t
+    state.draftTalk = t
+    persist()
+    const el = $(['tone-1', 'tone-2', 'tone-3'][t])
+    if (el) el.checked = true
+    if (state.current === 'hsl') applyBaseToHSL()
+  } catch (e) {}
+}
+setInterval(syncTalkFromPlugin, 3000)
+syncTalkFromPlugin()
+
+window.addEventListener('message', (e) => {
+  const d = e.data
+  if (!d) return
+  if (d.type === 'hcem:state') applyState(d.state)
+  if (d.type === 'hcem:goto') switchPage(d.page)
+})
+// 供 Rust 侧 eval 调用（右键菜单跳页）
+window.gotoPage = (page) => { if (page && PAGES[page]) switchPage(page) }
+// 页面加载后取一次待跳转页（右键菜单指定页）
+setTimeout(() => {
+  tauriInvoke('take_pending_page').then((p) => { if (p) window.gotoPage(p) }).catch(() => {})
+}, 80)
+</script>
+</body>
+</html>
