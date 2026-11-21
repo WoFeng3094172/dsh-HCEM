@@ -1,0 +1,15 @@
+
+链接: 
+https://pan.baidu.com/s/1XSu3RHRc4XVfz45YvCjKZQ?pwd=upn3 
+提取码: 
+upn33
+
+
+链接：
+https://pan.xunlei.com/s/VP7-8DcXSJrCO8RSykDU_yQ9A1?pwd=di9z#
+
+
+
+
+tools压缩包里是视频编码器，放到下目录。
+tools\ffmpeg-9.0.2-essentials_build
