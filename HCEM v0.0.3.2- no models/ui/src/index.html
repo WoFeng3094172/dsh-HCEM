@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HCEM 悬浮球 b2311</title>
+<style>
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+  }
+  body {
+    display: grid;
+    place-items: center;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  .container {
+    display: grid;
+    place-items: center;
+    position: relative;
+    width: 160px;
+    height: 160px;
+    pointer-events: none;
+    /* 缩放放在容器上：球和光圈一起缩，避免两者之间出现缝隙 */
+    transform: scale(var(--size, 1));
+    transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+  }
+
+  /* =========================================
+     1. 悬浮球（接收系统变量）
+     ========================================= */
+  .loader {
+    --color-one: #ffbf48;
+    --color-two: #be4a1d;
+    --color-three: #ffbf4780;
+    --color-four: #bf4a1d80;
+    --color-five: #ffbf4740;
+    --time-animation: 5s;
+    --size: 1;
+
+    grid-area: 1 / 1;
+    z-index: 2;
+    position: relative;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    overflow: hidden;
+    cursor: pointer;
+    pointer-events: auto;   /* 只有球体接收鼠标事件 */
+
+    /* 缩放已上移到 .container */
+
+    box-shadow:
+      0 0 15px 0 var(--color-three),
+      0 15px 35px 0 var(--color-four);
+  }
+
+  .loader::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    border-radius: 50%;
+    border-top: solid 1px var(--color-one);
+    border-bottom: solid 1px var(--color-two);
+    background: linear-gradient(180deg, var(--color-five), var(--color-four));
+    box-shadow:
+      inset 0 4px 4px 0 var(--color-three),
+      inset 0 -4px 4px 0 var(--color-four);
+  }
+
+  .loader .box {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: linear-gradient(180deg, var(--color-one) 30%, var(--color-two) 70%);
+    mask: url(#clipping);
+    -webkit-mask: url(#clipping);
+  }
+
+  .loader svg { position: absolute; width: 0; height: 0; }
+
+  .loader svg #clipping {
+    filter: contrast(15);
+    animation: roundness calc(var(--time-animation) * 2) linear infinite;
+  }
+  .loader svg #clipping polygon { filter: blur(7px); transform-box: fill-box; }
+  .loader svg #clipping polygon:nth-child(1) { transform-origin: 75% 25%; transform: rotate(90deg); }
+  .loader svg #clipping polygon:nth-child(2) { transform-origin: 50% 50%; animation: rotation var(--time-animation) linear infinite reverse; }
+  .loader svg #clipping polygon:nth-child(3) { transform-origin: 50% 60%; animation: rotation var(--time-animation) linear infinite; animation-delay: calc(var(--time-animation) / -3); }
+  .loader svg #clipping polygon:nth-child(4) { transform-origin: 40% 40%; animation: rotation var(--time-animation) linear infinite reverse; }
+  .loader svg #clipping polygon:nth-child(5) { transform-origin: 40% 40%; animation: rotation var(--time-animation) linear infinite reverse; animation-delay: calc(var(--time-animation) / -2); }
+  .loader svg #clipping polygon:nth-child(6) { transform-origin: 60% 40%; animation: rotation var(--time-animation) linear infinite; }
+  .loader svg #clipping polygon:nth-child(7) { transform-origin: 60% 40%; animation: rotation var(--time-animation) linear infinite; animation-delay: calc(var(--time-animation) / -1.5); }
+
+  /* =========================================
+     2. 光圈01（悬停显示）
+     ========================================= */
+  .card {
+    grid-area: 1 / 1;
+    z-index: 1;
+    width: 100px; height: 100px;
+    background-image: linear-gradient(163deg, #00ff75 0%, #3700ff 100%);
+    border-radius: 50%;
+    padding: 10px;
+    opacity: 0;
+    transform: scale(0.95);
+    transition: all 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    pointer-events: none;
+  }
+  .card2 { width: 100%; height: 100%; background-color: #0d0d0d; border-radius: 50%; }
+
+  .container:not(.is-inputting) .loader:hover ~ .card {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0px 0px 25px 1px rgba(0, 255, 117, 0.35);
+  }
+
+  /* =========================================
+     3. 光圈02（输入时显示）
+     ========================================= */
+  .ring2-wrapper {
+    grid-area: 1 / 1;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+  .container.is-inputting .ring2-wrapper { opacity: 1; }
+  .container.is-inputting .card { opacity: 0 !important; }
+  /* 录音中：整体加暖色光环 + 呼吸脉冲，让用户一眼看到 */
+  .container.is-inputting #clickableLoader {
+    filter: drop-shadow(0 0 14px rgba(255, 120, 60, 0.85)) brightness(1.15);
+    animation: rec-pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes rec-pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.06); }
+  }
+
+  .container-02 {
+    position: relative;
+    border-radius: 50%;
+    height: 100px; width: 100px;
+    animation: rotate_3922 1.2s linear infinite;
+    background-color: #2a00cc;
+    background-image: linear-gradient(135deg, #00cc5e, #2a00cc);
+  }
+  .container-02 span {
+    position: absolute;
+    border-radius: 50%;
+    height: 100%; width: 100%;
+    background-color: #2a00cc;
+    background-image: linear-gradient(135deg, #00cc5e, #2a00cc);
+  }
+  .container-02 span:nth-of-type(1) { filter: blur(3px); }
+  .container-02 span:nth-of-type(2) { filter: blur(7px); }
+  .container-02 span:nth-of-type(3) { filter: blur(14px); }
+  .container-02 span:nth-of-type(4) { filter: blur(22px); }
+  .container-02::after {
+    content: "";
+    position: absolute;
+    top: 10px; left: 10px; right: 10px; bottom: 10px;
+    background-color: #0d0d0d;
+    border-radius: 50%;
+  }
+
+  @keyframes rotate_3922 { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @keyframes rotation { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  @keyframes roundness {
+    0% { filter: contrast(15); }
+    20% { filter: contrast(3); }
+    40% { filter: contrast(3); }
+    60% { filter: contrast(15); }
+    100% { filter: contrast(15); }
+  }
+</style>
+</head>
+<body>
+  <div class="container" id="mainContainer">
+    <!-- 悬浮球 -->
+    <div class="loader" id="clickableLoader">
+      <div class="box"></div>
+      <!-- SVG 液态遮罩（光云） -->
+      <svg>
+        <defs>
+          <mask id="clipping">
+            <polygon points="50,15 85,50 50,85 15,50" fill="white" />
+            <polygon points="50,22 78,50 50,78 22,50" fill="white" />
+            <polygon points="50,29 71,50 50,71 29,50" fill="white" />
+            <polygon points="50,36 64,50 50,64 36,50" fill="white" />
+            <polygon points="50,43 57,50 50,57 43,50" fill="white" />
+            <polygon points="50,25.5 74.5,50 50,74.5 25.5,50" fill="white" />
+            <polygon points="50,32.5 67.5,50 50,67.5 32.5,50" fill="white" />
+          </mask>
+        </defs>
+      </svg>
+    </div>
+
+    <!-- 光圈01 -->
+    <div class="card"><div class="card2"></div></div>
+
+    <!-- 光圈02 -->
+    <div class="ring2-wrapper">
+      <div class="container-02"><span></span><span></span><span></span><span></span></div>
+    </div>
+  </div>
+
+  <script>
+    const mainContainer = document.getElementById('mainContainer')
+    const sphere = document.getElementById('clickableLoader')
+
+    /* ==========================================
+       系统接口：更新悬浮球（HSL + 尺寸）
+       h/s/l 为最终色相/饱和度/明度（已做过 HCEM 的 +60 偏移）
+       ========================================== */
+    function updateSphere(h, s, l, size = 1) {
+      sphere.style.setProperty('--color-one', `hsl(${h}, ${s}%, ${l}%)`)
+      sphere.style.setProperty('--color-two', `hsl(${h}, ${s}%, ${Math.max(8, l - 20)}%)`)
+      sphere.style.setProperty('--color-three', `hsla(${h}, ${s}%, ${l}%, 0.5)`)
+      sphere.style.setProperty('--color-four', `hsla(${h}, ${s}%, ${Math.max(8, l - 20)}%, 0.5)`)
+      sphere.style.setProperty('--color-five', `hsla(${h}, ${s}%, ${l}%, 0.25)`)
+
+      // S+L 越高，动画越快（5s → 1.5s）
+      const speedFactor = Math.min((s + l) / 200, 1)
+      sphere.style.setProperty('--time-animation', `${(5 - speedFactor * 3.5).toFixed(2)}s`)
+
+      // 尺寸：设在容器上（球和光圈一起缩）
+      const wrap = document.getElementById('mainContainer')
+      if (wrap) wrap.style.setProperty('--size', size)
+    }
+
+    /* ---------- 与 HCEM 的 HSL 约定 ---------- */
+    let orbState = { h: 90, s: 25, l: 55, size: 1 }   // h 已是最终色相
+
+    function applyHSL(H, S, L) {
+      const h = ((Number(H) % 360) + 360) % 360
+      const s = Math.max(20, Math.min(100, Number(S) || 15))
+      const l = Math.max(20, Math.min(85, Number(L) || 55))
+      orbState.h = (h + 60) % 360      // HCEM: H=0 是黄，色环偏移 +60
+      orbState.s = Math.max(35, s)
+      orbState.l = l
+      updateSphere(orbState.h, orbState.s, orbState.l, orbState.size)
+    }
+
+    function setOrbScale(scale) {
+      const s = Math.max(0.5, Math.min(2, Number(scale) || 1))
+      orbState.size = s
+      updateSphere(orbState.h, orbState.s, orbState.l, s)
+    }
+
+    /* ---------- 交互：拖动 / 长按 / 左键聊天 / 右键菜单 ---------- */
+    const tauri = window.__TAURI__
+    const invoke = (cmd, args) => {
+      if (tauri && tauri.core && tauri.core.invoke) return tauri.core.invoke(cmd, args || {})
+      return Promise.reject(new Error('no tauri'))
+    }
+    const currentWindow = () =>
+      (tauri && tauri.window && tauri.window.getCurrentWindow) ? tauri.window.getCurrentWindow() : null
+
+    let pressTimer = null
+    let downAt = null
+    let longPress = false
+    let dragStarted = false
+    let suppressUntil = 0
+
+    sphere.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return
+      downAt = { x: e.screenX, y: e.screenY }
+      longPress = false
+      dragStarted = false
+      // 按下瞬间：发光 + 停 TTS + 开始录音（一次做完，用户看到的就是"按住即录"）
+      mainContainer.classList.add('is-inputting')
+      invoke('dbg_click', { what: 'md' }).catch(() => {})
+      invoke('voice_start', {}).catch(() => {})
+      // 600ms 只是"确认这是长按而不是点击"的门槛
+      pressTimer = setTimeout(() => {
+        longPress = true
+      }, 600)
+    })
+
+    window.addEventListener('mousemove', (e) => {
+      if (!downAt || longPress || dragStarted) return
+      if (Math.abs(e.screenX - downAt.x) + Math.abs(e.screenY - downAt.y) > 3) {
+        clearTimeout(pressTimer)
+        dragStarted = true
+        suppressUntil = Date.now() + 500
+        // 是拖拽不是长按 → 熄灭发光 + 丢掉这次录音
+        mainContainer.classList.remove('is-inputting')
+        invoke('voice_cancel', {}).catch(() => {})
+        try {
+          const w = currentWindow()
+          if (w && w.startDragging) w.startDragging()
+        } catch (err) {}
+      }
+    })
+
+    window.addEventListener('mouseup', (e) => {
+      if (e.button !== 0) { invoke('dbg_click', { what: 'mu-right' }).catch(() => {}); return }
+      invoke('dbg_click', { what: 'mu' }).catch(() => {})
+      clearTimeout(pressTimer)
+      if (longPress) {
+        longPress = false
+        suppressUntil = Date.now() + 500
+        mainContainer.classList.remove('is-inputting')
+        // 松开：结束录音并提交识别结果
+        invoke('voice_end', {}).catch(() => {})
+      } else if (!dragStarted) {
+        // 短按（<600ms）：熄灭发光 + 取消这次录音（外面会走 open_menu）
+        mainContainer.classList.remove('is-inputting')
+        invoke('voice_cancel', {}).catch(() => {})
+      }
+      downAt = null
+    })
+
+    /* 左键：打开主菜单（原「对话输入框」没法和 HCEM 会话同步，已隐藏） */
+    sphere.addEventListener('click', () => {
+      // 左键不再直接进主菜单：主入口是右键 → 快捷菜单 → 主菜单
+      invoke('dbg_click', { what: 'left-click(no-menu)' }).catch(() => {})
+    })
+
+    /* 页面任意位置右键都不弹网页菜单 */
+    document.addEventListener('contextmenu', (e) => { e.preventDefault() }, true)
+
+    /* 右键：快捷菜单 */
+    sphere.addEventListener('contextmenu', (e) => {
+      e.preventDefault()
+      invoke('open_ctx', {}).catch(() => {})
+    })
+
+    /* ---------- 暴露给 Rust eval ---------- */
+    window.updateSphere = updateSphere
+    window.applyHSL = applyHSL
+    window.setOrbScale = setOrbScale
+
+    /* 初始颜色 */
+    applyHSL(30, 25, 55)
+  </script>
+</body>
+</html>

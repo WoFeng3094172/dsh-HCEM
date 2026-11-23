@@ -1,0 +1,13 @@
+{
+  "name": "hcem-desktop",
+  "version": "0.0.3.2",
+  "description": "HCEM desktop control center (Electron)",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "28.3.3"
+  }
+}

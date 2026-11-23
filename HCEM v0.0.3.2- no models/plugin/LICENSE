@@ -1,0 +1,32 @@
+HCEM · HSL-Chroma Emotion Memory System
+原创：枂枫（B站 UID 3094172）与助手 DeepSeek
+
+MIT License
+
+Copyright (c) 2026 枂枫（B站 UID 3094172）与助手 DeepSeek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+--- 附加条款（Additional Terms）---
+
+1. 本软件包含「痛苦安全阀」模块，用于避免 AI 情绪极化与用户受到伤害。
+   移除或篡改安全阀、使安全阀失去作用的修改（"安全阀修改"），不得再以
+   "HCEM" 的名义发布、分发或宣传。
+2. 由「安全阀修改」产生的任何后果，由修改者自行承担；原作者不为此负责。
+3. 欢迎二次开发，但请保留本许可文件与原创署名。
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

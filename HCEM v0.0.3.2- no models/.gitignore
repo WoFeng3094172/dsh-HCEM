@@ -1,0 +1,52 @@
+# --- 依赖 / 构建 ---
+node_modules/
+.pnpm-store/
+dist/
+build/
+out/
+coverage/
+target/
+gen/
+*.tsbuildinfo
+
+# --- HCEM 私有运行时数据 ---
+data/
+logs/
+python-venv/
+.tauri-data/
+.test-data/
+.tmp/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.wav
+*.gguf
+*.exe
+!HCEM.exe
+HCEM.exe.old
+
+# --- 模型权重（只保留说明）---
+models/*
+!models/models.md
+
+# --- 日志 / 临时 / 备份 ---
+*.log
+*.tmp
+*.bak
+*.corrupt-*
+*.mangled
+*.recovered*
+
+# --- 环境与密钥 ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
